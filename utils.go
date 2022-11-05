@@ -1,7 +1,7 @@
 //go:build linux
 // +build linux
 
-package uring_net
+package UringNet
 
 import (
 	"golang.org/x/sys/unix"

@@ -1,4 +1,4 @@
-package uring_net
+package UringNet
 
 import (
 	"fmt"

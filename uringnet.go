@@ -1,6 +1,6 @@
 // Package uring_net
 // @Description:
-package uring_net
+package UringNet
 
 import (
 	"crypto/tls"

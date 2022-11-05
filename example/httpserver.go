@@ -1,7 +1,7 @@
 package main
 
 import (
-	uring_net "UringNet/uring-net"
+	"UringNet"
 	"bytes"
 	"github.com/evanphx/wildcat"
 	"log"
@@ -11,9 +11,9 @@ import (
 )
 
 type testServer struct {
-	uring_net.BuiltinEventEngine
+	UringNet.BuiltinEventEngine
 
-	testloop *uring_net.Ringloop
+	testloop *UringNet.Ringloop
 	//ring      *uring_net.URingNet
 	addr      string
 	multicore bool
@@ -47,7 +47,7 @@ var (
 //	@receiver ts
 //	@param data
 //	@return uring_net.Action
-func (ts *testServer) OnTraffic(data *uring_net.UserData, ringnet uring_net.URingNet) uring_net.Action {
+func (ts *testServer) OnTraffic(data *UringNet.UserData, ringnet UringNet.URingNet) UringNet.Action {
 
 	//hc := ts.Context().(*httpCodec)
 
@@ -66,7 +66,7 @@ pipeline:
 		//c.Write(errMsgBytes)
 		//fmt.Println("error message: ", err.Error())
 
-		return uring_net.Close
+		return UringNet.Close
 	}
 
 	appendResponse(&data.WriteBuf)
@@ -86,7 +86,7 @@ pipeline:
 	if len(buffer) > 0 && len(buffer) != 87 {
 		//if data.Buffer[0] != 0 {
 		//fmt.Println("the buffer: ", remainbufstr, " the length: ", len(remainbufstr))
-		log.Println(uring_net.BytesToString(buffer))
+		log.Println(UringNet.BytesToString(buffer))
 		log.Println(len(buffer))
 		goto pipeline
 		//}
@@ -110,20 +110,20 @@ pipeline:
 	//c.Write(hc.buf)
 	//hc.buf = hc.buf[:0]
 
-	return uring_net.Echo
+	return UringNet.Echo
 }
 
-func (ts *testServer) OnWritten(data uring_net.UserData) uring_net.Action {
+func (ts *testServer) OnWritten(data UringNet.UserData) UringNet.Action {
 	//buf, _ := c.Next(-1)
 	//thebuffer := ts.testloop.GetBuffer()
 	//fmt.Println("Send Message to Client: \n", string(data))
 	//fmt.Println("Send Message to Client: \n", uring_net.BytesToString(thebuffer[data.R1.(uint64)][:]))
 	//c.Write(buf)
 
-	return uring_net.None
+	return UringNet.None
 }
 
-func (ts *testServer) OnOpen(data *uring_net.UserData) ([]byte, uring_net.Action) {
+func (ts *testServer) OnOpen(data *UringNet.UserData) ([]byte, UringNet.Action) {
 	//buf, _ := c.Next(-1)
 	//thebuffer := ts.testloop.GetBuffer()
 	//fmt.Println("Send Message to Client: \n", string(data))
@@ -132,7 +132,7 @@ func (ts *testServer) OnOpen(data *uring_net.UserData) ([]byte, uring_net.Action
 	//c.SetContext(&httpCodec{parser: wildcat.NewHTTPParser()})
 	//return nil, gnet.None
 	ts.SetContext(&httpCodec{parser: wildcat.NewHTTPParser()})
-	return nil, uring_net.None
+	return nil, UringNet.None
 }
 
 func main() {
@@ -141,9 +141,9 @@ func main() {
 	//accptRingNet, _ := uring_net.New(uring_net.NetAddress{uring_net.TcpAddr, addr}, 500, true)
 
 	//server := &testServer{}
-	ringNets, _ := uring_net.NewMany(uring_net.NetAddress{uring_net.TcpAddr, addr}, 3200, true, 2, &testServer{}) //runtime.NumCPU()
+	ringNets, _ := UringNet.NewMany(UringNet.NetAddress{UringNet.TcpAddr, addr}, 3200, true, 2, &testServer{}) //runtime.NumCPU()
 
-	loop := uring_net.SetLoops(ringNets)
+	loop := UringNet.SetLoops(ringNets)
 
 	//server.testloop = loop
 
