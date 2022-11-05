@@ -143,7 +143,7 @@ func main() {
 	//server := &testServer{}
 	ringNets, _ := UringNet.NewMany(UringNet.NetAddress{UringNet.TcpAddr, addr}, 3200, true, 2, &testServer{}) //runtime.NumCPU()
 
-	loop := UringNet.SetLoops(ringNets)
+	loop := UringNet.SetLoops(ringNets, 4000)
 
 	//server.testloop = loop
 

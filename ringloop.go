@@ -34,7 +34,7 @@ const bufLength uint64 = 1024
 //	@Description:
 //	@param urings
 //	@return *Ringloop
-func SetLoops(urings []*URingNet) *Ringloop {
+func SetLoops(urings []*URingNet, bufferSize int) *Ringloop {
 	size := len(urings)
 	theloop := &Ringloop{}
 	theloop.RingCount = int32(size)
@@ -50,8 +50,8 @@ func SetLoops(urings []*URingNet) *Ringloop {
 		sqe2 := theloop.RingNet[i].ring.GetSQEntry()
 		//Buffers := make([][]byte, 1024, 1024)
 		//tempb := Init2DSlice(1024, 1024)
-		urings[i].Autobuffer = make([][bufLength]byte, 4000)
-		uring.ProvideBuf(sqe2, urings[i].Autobuffer, 4000, uint32(bufLength), uint16(i))
+		urings[i].Autobuffer = make([][bufLength]byte, bufferSize)
+		uring.ProvideBuf(sqe2, urings[i].Autobuffer, uint32(bufferSize), uint32(bufLength), uint16(i))
 		data := makeUserData(provideBuffer)
 		sqe2.SetUserData(data.id)
 		theloop.RingNet[i].userDataList.Store(data.id, data)

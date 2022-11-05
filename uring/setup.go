@@ -7,8 +7,9 @@ import (
 )
 
 const (
-	MinSize = 2
-	MaxSize = 4096
+	MinSize    = 2
+	MaxSize    = 4096
+	BufferSize = 1024
 )
 
 func Setup(size uint, params *IOUringParams) (*Ring, error) {

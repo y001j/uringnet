@@ -45,7 +45,7 @@ type URingNet struct {
 	ReadBuffer        []byte
 	WriteBuffer       []byte
 
-	Autobuffer [][1024]byte
+	Autobuffer [][bufLength]byte
 
 	ringloop *Ringloop
 
@@ -418,7 +418,7 @@ func (ringnet *URingNet) read(Fd int32, sqe *uring.SQEntry, ringIndex uint16) {
 	sqe.SetFlags(uring.IOSQE_BUFFER_SELECT)
 	sqe.SetBufGroup(ringIndex)
 	//uring.Read(sqe, uintptr(thedata.Fd), ringnet.ReadBuffer)
-	uring.ReadNoBuf(sqe, uintptr(Fd), 1024)
+	uring.ReadNoBuf(sqe, uintptr(Fd), uint32(bufLength))
 
 	//ringnet.userDataList.Store(data2.id, data2)
 	//co := conn{}
@@ -502,7 +502,7 @@ func NewMany(addr NetAddress, size uint, sqpoll bool, num int, handler EventHand
 	for i := 0; i < num; i++ {
 		uringArray[i] = &URingNet{}
 		//uringArray[i].userDataMap = make(map[uint64]*UserData)
-		uringArray[i].ReadBuffer = make([]byte, 2048)
+		uringArray[i].ReadBuffer = make([]byte, 1024)
 		uringArray[i].WriteBuffer = make([]byte, 1024)
 		uringArray[i].SocketFd = sockfd
 		uringArray[i].Addr = addr.Address
@@ -543,14 +543,14 @@ type NetAddress struct {
 	Address  string
 }
 
-// addBuffer because kernel buffer
+// addBuffer  kernel buffer need to be restored after using
 //
 //	@Description:
 //	@receiver ringNet
 //	@param offset
 func (ringNet *URingNet) addBuffer(offset uint64, gid uint16) {
 	sqe := ringNet.ring.GetSQEntry()
-	uring.ProvideSingleBuf(sqe, &ringNet.Autobuffer[offset], 1, 1024, gid, offset)
+	uring.ProvideSingleBuf(sqe, &ringNet.Autobuffer[offset], 1, uint32(bufLength), gid, offset)
 	data := makeUserData(provideBuffer)
 	sqe.SetUserData(data.id)
 	ringNet.userDataList.Store(data.id, data)

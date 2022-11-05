@@ -169,7 +169,7 @@ func Accept(sqe *SQEntry, fd uintptr, clientAddr *syscall.RawSockaddrAny, len *u
 	sqe.SetOffset(uint64(uintptr(unsafe.Pointer(&len))))
 }
 
-func ProvideBuf(sqe *SQEntry, clientAddr [][1024]byte, bufferCount uint32, bufferSize uint32, gid uint16) {
+func ProvideBuf(sqe *SQEntry, clientAddr [][BufferSize]byte, bufferCount uint32, bufferSize uint32, gid uint16) {
 
 	sqe.SetOpcode(IORING_OP_PROVIDE_BUFFERS)
 	//set the buffer group id
@@ -185,7 +185,7 @@ func ProvideBuf(sqe *SQEntry, clientAddr [][1024]byte, bufferCount uint32, buffe
 
 }
 
-func ProvideSingleBuf(sqe *SQEntry, clientAddr *[1024]byte, bufferCount uint32, bufferSize uint32, gid uint16, offset uint64) {
+func ProvideSingleBuf(sqe *SQEntry, clientAddr *[BufferSize]byte, bufferCount uint32, bufferSize uint32, gid uint16, offset uint64) {
 
 	sqe.SetOpcode(IORING_OP_PROVIDE_BUFFERS)
 	//set the buffer group id
