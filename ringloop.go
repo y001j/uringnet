@@ -106,6 +106,7 @@ func (ringNet *URingNet) EchoLoop() {
 }
 
 func (loop *Ringloop) RunMany() {
+
 	for i := 0; i < int(loop.RingCount); i++ {
 		loop.RingNet[i].EchoLoop()
 		go loop.RingNet[i].Run2(uint16(i))
@@ -134,7 +135,7 @@ const (
 	Echo
 	Read
 	EchoAndClose // response then close
-	// Close closes the connection.
+	//Close: the connection.
 	Close
 
 	// Shutdown shutdowns the engine.

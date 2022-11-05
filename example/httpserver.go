@@ -2,6 +2,7 @@ package main
 
 import (
 	"UringNet"
+	socket "UringNet/sockets"
 	"bytes"
 	"github.com/evanphx/wildcat"
 	"log"
@@ -83,7 +84,7 @@ pipeline:
 
 	//remainbufstr := strings.TrimSpace(uring_net.BytesToString(data.Buffer))
 	//strings.ReplaceAll(remainbufstr, " ", "")
-	if len(buffer) > 0 && len(buffer) != 87 {
+	if len(buffer) > 0 && len(buffer) != 87 && len(buffer) != 41 {
 		//if data.Buffer[0] != 0 {
 		//fmt.Println("the buffer: ", remainbufstr, " the length: ", len(remainbufstr))
 		log.Println(UringNet.BytesToString(buffer))
@@ -92,23 +93,6 @@ pipeline:
 		//}
 	}
 	//log.Println("data:", "head offset: ", uring_net.BytesToString(data.WriteBuf))
-
-	//data.Bytebuffer = *bytes.NewBuffer(hc.buf)
-	//copy(hc.buf, data.Buffer)
-
-	//data.Buffer = hc.buf
-	//log.Println("response length:", len(data.Buffer))
-	//log.Println("response length:", len(data.WriteBuf))
-	//ringnet.Write2(data.Fd, data.WriteBuf)
-	//fmt.Println("buffer: ", hc.buf)
-	//sqe2 := .ring.GetSQEntry()
-	// claim buffer for I/O write
-	//bw := ringnet.BufferPool.Get().(*[]byte)
-	//bw := make([]byte, 1024)
-	//sqe2.SetFlags(uring.IOSQE_IO_LINK)
-	//ringnet.write(data, sqe2)
-	//c.Write(hc.buf)
-	//hc.buf = hc.buf[:0]
 
 	return UringNet.Echo
 }
@@ -141,7 +125,8 @@ func main() {
 	//accptRingNet, _ := uring_net.New(uring_net.NetAddress{uring_net.TcpAddr, addr}, 500, true)
 
 	//server := &testServer{}
-	ringNets, _ := UringNet.NewMany(UringNet.NetAddress{UringNet.TcpAddr, addr}, 3200, true, 2, &testServer{}) //runtime.NumCPU()
+	options := socket.SocketOptions{}
+	ringNets, _ := UringNet.NewMany(UringNet.NetAddress{socket.Tcp4, addr}, 3200, false, 4, options, &testServer{}) //runtime.NumCPU()
 
 	loop := UringNet.SetLoops(ringNets, 4000)
 

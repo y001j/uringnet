@@ -3,6 +3,7 @@
 package UringNet
 
 import (
+	socket "UringNet/sockets"
 	"crypto/tls"
 	"fmt"
 	"golang.org/x/sys/unix"
@@ -18,9 +19,9 @@ import (
 )
 
 type URingNet struct {
-	Addr     string         // TCP address to listen on, ":http" if empty
-	Type     NetAddressType //the connection type
-	SocketFd int            //listener socket fd
+	Addr     string                // TCP address to listen on, ":http" if empty
+	Type     socket.NetAddressType //the connection type
+	SocketFd int                   //listener socket fd
 	//Handler           Handler // handler to invoke, http.DefaultServeMux if nil
 	Handler           EventHandler
 	TLSConfig         *tls.Config
@@ -58,13 +59,6 @@ type URingNet struct {
 }
 
 type NetAddressType int
-
-const (
-	TcpAddr NetAddressType = iota // tcpAddr = 0
-	UdpAddr
-	IpAddr
-	UnixAddr
-)
 
 type UserdataState uint32
 
@@ -173,6 +167,8 @@ var paraFlags uint32
 // It will Run with Kernel buffer, we should set a proper buffer size.
 // TODO: Still don't have the best formula to get buffer size and SQE size.
 func (ringnet *URingNet) Run2(ringindex uint16) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	ringnet.Handler.OnBoot(*ringnet)
 	var connect_num uint32 = 0
 	for {
@@ -248,7 +244,6 @@ func (ringnet *URingNet) Run2(ringindex uint16) {
 		case uint32(PrepareWriter):
 			if cqe.Result() <= 0 {
 				continue
-
 			}
 			ringnet.Handler.OnWritten(*thedata)
 			ringnet.userDataList.Delete(thedata.id)
@@ -258,9 +253,6 @@ func (ringnet *URingNet) Run2(ringindex uint16) {
 			//delete(ringnet.userDataMap, thedata.id)
 			ringnet.userDataList.Delete(thedata.id)
 		}
-		//}()
-
-		//cqe.Flags()
 	}
 }
 
@@ -309,6 +301,7 @@ func response(ringnet *URingNet, data *UserData, gid uint16, offset uint64) {
 		ringnet.read(data.Fd, sqe, gid)
 		//sqe.SetFlags(uring.IOSQE_ASYNC)
 		//ringnet.read2(data.Fd, sqe)
+		ringnet.addBuffer(offset, gid)
 
 		// recycle buffer
 		//ringnet.BufferPool.Put(thedata.buffer)
@@ -335,6 +328,7 @@ func response(ringnet *URingNet, data *UserData, gid uint16, offset uint64) {
 		//sqe2.SetFlags(uring.IOSQE_IO_LINK)
 		ringnet.Write(data, sqe2)
 		sqe := ringnet.ring.GetSQEntry()
+		sqe.SetFlags(uring.IOSQE_IO_DRAIN)
 		ringnet.close(data, sqe)
 		_, err := ringnet.ring.Submit(0, &paraFlags)
 		if err != nil {
@@ -345,7 +339,7 @@ func response(ringnet *URingNet, data *UserData, gid uint16, offset uint64) {
 		ringnet.close(data, sqe)
 	}
 	//  recover kernel buffer; the buffer should be restored after using.
-	ringnet.addBuffer(offset, gid)
+
 	//  remove the userdata in this loop
 	//data.Buffer = nil
 	//data.WriteBuf = nil
@@ -450,16 +444,20 @@ func (ringnet *URingNet) read2(Fd int32, sqe *uring.SQEntry) {
 }
 
 // New Creates a new uRingnNet which is used to
-func New(addr NetAddress, size uint, sqpoll bool) (*URingNet, error) {
+func New(addr NetAddress, size uint, sqpoll bool, options socket.SocketOptions) (*URingNet, error) {
 	//1. set the socket
 	//var ringNet *URingNet
 	ringNet := &URingNet{}
 	ringNet.userDataMap = make(map[uint64]*UserData)
+	ops := socket.SetOptions(string(addr.AddrType), options)
 	switch addr.AddrType {
-	case TcpAddr:
-		ringNet.SocketFd = ListenTCPSocket(addr)
-	case UdpAddr:
-		ringNet.SocketFd = listenUDPSocket(addr)
+	case socket.Tcp, socket.Tcp4, socket.Tcp6:
+		ringNet.SocketFd, _, _ = socket.TCPSocket(string(addr.AddrType), addr.Address, true, ops...) //ListenTCPSocket(addr)
+	case socket.Udp, socket.Udp4, socket.Udp6:
+		ringNet.SocketFd, _, _ = socket.UDPSocket(string(addr.AddrType), addr.Address, true, ops...)
+	case socket.Unix:
+		ringNet.SocketFd, _, _ = socket.UnixSocket(string(addr.AddrType), addr.Address, true, ops...)
+
 	default:
 		ringNet.SocketFd = -1
 	}
@@ -485,14 +483,17 @@ func New(addr NetAddress, size uint, sqpoll bool) (*URingNet, error) {
 //	@param num number of io_uring instances need to be created
 //	@return *[]URingNet
 //	@return error
-func NewMany(addr NetAddress, size uint, sqpoll bool, num int, handler EventHandler) ([]*URingNet, error) {
+func NewMany(addr NetAddress, size uint, sqpoll bool, num int, options socket.SocketOptions, handler EventHandler) ([]*URingNet, error) {
 	//1. set the socket
 	var sockfd int
+	ops := socket.SetOptions(string(addr.AddrType), options)
 	switch addr.AddrType {
-	case TcpAddr:
-		sockfd = ListenTCPSocket(addr)
-	case UdpAddr:
-		sockfd = listenUDPSocket(addr)
+	case socket.Tcp, socket.Tcp4, socket.Tcp6:
+		sockfd, _, _ = socket.TCPSocket(string(addr.AddrType), addr.Address, true, ops...) //ListenTCPSocket(addr)
+	case socket.Udp, socket.Udp4, socket.Udp6:
+		sockfd, _, _ = socket.UDPSocket(string(addr.AddrType), addr.Address, true, ops...)
+	case socket.Unix:
+		sockfd, _, _ = socket.UnixSocket(string(addr.AddrType), addr.Address, true, ops...)
 	default:
 		sockfd = -1
 	}
@@ -539,7 +540,7 @@ func ProcTask() {
 }
 
 type NetAddress struct {
-	AddrType NetAddressType
+	AddrType socket.NetAddressType
 	Address  string
 }
 

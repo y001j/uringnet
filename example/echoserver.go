@@ -2,6 +2,7 @@ package main
 
 import (
 	"UringNet"
+	socket "UringNet/sockets"
 	"os"
 	"sync"
 )
@@ -52,10 +53,10 @@ func main() {
 
 	//accptRingNet, _ := uring_net.New(uring_net.NetAddress{uring_net.TcpAddr, addr}, 500, true)
 
-	//server := &testServer{}
-	ringNets, _ := UringNet.NewMany(UringNet.NetAddress{UringNet.TcpAddr, addr}, 6000, true, 7, &testServer{}) //runtime.NumCPU()
+	options := socket.SocketOptions{}
+	ringNets, _ := UringNet.NewMany(UringNet.NetAddress{socket.Tcp4, addr}, 3200, true, 5, options, &testServer{}) //runtime.NumCPU()
 
-	loop := UringNet.SetLoops(ringNets)
+	loop := UringNet.SetLoops(ringNets, 3000)
 
 	//server.testloop = loop
 
