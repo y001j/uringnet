@@ -1,0 +1,115 @@
+package main
+
+import (
+	uring_net "UringNet/uring-net"
+	"github.com/evanphx/wildcat"
+	"log"
+	"os"
+	"sync"
+	"time"
+)
+
+type testServer struct {
+	uring_net.BuiltinEventEngine
+
+	testloop *uring_net.Ringloop
+	//ring      *uring_net.URingNet
+	addr      string
+	multicore bool
+}
+
+type httpCodec struct {
+	parser *wildcat.HTTPParser
+	buf    []byte
+}
+
+func (hc *httpCodec) appendResponse() {
+	hc.buf = append(hc.buf, "HTTP/1.1 200 OK\r\nServer: gnet\r\nContent-Type: text/plain\r\nDate: Mon, 02 Jan 2022 15:04:05 GMT"...)
+	//hc.buf = time.Now().AppendFormat(hc.buf, "Mon, 02 Jan 2006 15:04:05 GMT")
+	hc.buf = append(hc.buf, "\r\nContent-Length: 12\r\n\r\nHello World!"...)
+}
+
+func appendResponse(hc *[]byte) {
+	*hc = append(*hc, "HTTP/1.1 200 OK\r\nServer: uringNet\r\nContent-Type: text/plain\r\nDate: "...)
+	*hc = time.Now().AppendFormat(*hc, "Mon, 02 Jan 2006 15:04:05 GMT")
+	*hc = append(*hc, "\r\nContent-Length: 12\r\n\r\nHello World!"...)
+}
+
+var (
+	errMsg      = "Internal Server Error"
+	errMsgBytes = []byte(errMsg)
+)
+
+// OnTraffic
+//
+//	@Description:
+//	@receiver ts
+//	@param data
+//	@return uring_net.Action
+func (ts *testServer) OnTraffic(data *uring_net.UserData, ringnet uring_net.URingNet) uring_net.Action {
+
+	parser := ts.Context().(*httpCodec).parser
+
+pipeline:
+
+	buffer := ringnet.ReadBuffer[:data.BufSize]
+
+	headerOffset, err := parser.Parse(buffer)
+
+	if err != nil {
+		return uring_net.Close
+	}
+
+	appendResponse(&data.WriteBuf)
+	bodyLen := int(parser.ContentLength())
+	if bodyLen == -1 {
+		bodyLen = 0
+	}
+	//log.Println("before", len(buffer))
+	buffer = buffer[headerOffset+bodyLen:]
+	//log.Println("after", len(buffer))
+	if len(buffer) > 0 {
+		log.Println(uring_net.BytesToString(buffer))
+		log.Println(len(buffer))
+		goto pipeline
+	}
+
+	return uring_net.Echo
+}
+
+func (ts *testServer) OnWritten(data uring_net.UserData) uring_net.Action {
+	return uring_net.None
+}
+
+func (ts *testServer) OnOpen(data *uring_net.UserData) ([]byte, uring_net.Action) {
+	ts.SetContext(&httpCodec{parser: wildcat.NewHTTPParser()})
+	return nil, uring_net.None
+}
+
+func main() {
+	addr := os.Args[1]
+
+	//accptRingNet, _ := uring_net.New(uring_net.NetAddress{uring_net.TcpAddr, addr}, 500, true)
+
+	//server := &testServer{}
+	ringNets, _ := uring_net.NewManyForAcceptor(uring_net.NetAddress{uring_net.TcpAddr, addr}, 3200, true, 2, &testServer{}) //runtime.NumCPU()
+
+	loop := uring_net.SetLoops(ringNets)
+
+	//server.testloop = loop
+
+	//loop := uring_net.SetLoop(ringNet)
+
+	var waitgroup sync.WaitGroup
+	waitgroup.Add(1)
+
+	//RunMany(ringNets)
+	//ringNets[0].Run2()
+
+	//ringNets[0].EchoLoop()
+	//go ringNets[0].RunAccept(ringNets)
+	//loop.RunManyRW()
+	loop.RunManyAcceptor()
+
+	waitgroup.Wait()
+}
