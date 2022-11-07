@@ -23,7 +23,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"UringNet/errors"
+	"github.com/y001j/UringNet/errors"
 )
 
 // GetUnixSockAddr the structured addresses based on the protocol and raw address.

@@ -41,19 +41,26 @@ func (loop *Ringloop) GetConnects(NetAddr string) {
 			fmt.Println("tcp server accept error ", err)
 			break
 		}
-		//data2 := makeUserData(prepareReader)
-		//data2.Fd = int32(f.Fd())
-		//sqe := loop.RingNet[count].ring.GetSQEntry()
+		data2 := makeUserData(prepareReader)
+		data2.Fd = int32(f.Fd())
+
 		loop.RingNet[count].Fd.Store(f.Fd())
 
 		data := makeUserData(accepted)
 		loop.RingNet[count].Handler.OnOpen(data)
 		//loop.RingNet[count].SocketFd = int(f.Fd())
 
-		//loop.RingNet[count].userDataList.Store(data2.id, data2)
+		sqe := loop.RingNet[count].ring.GetSQEntry()
+		sqe.SetUserData(data2.id)
+		sqe.SetFlags(uring.IOSQE_BUFFER_SELECT | uring.IOSQE_ASYNC | uring.IOSQE_IO_DRAIN)
+		sqe.SetBufGroup(uint16(count))
+		//uring.Read(sqe, uintptr(thedata.Fd), ringnet.ReadBuffer)
+		uring.ReadNoBuf(sqe, f.Fd(), uint32(bufLength))
 
 		//uring.Read(sqe, f.Fd(), loop.RingNet[count].ReadBuffer)
-		//loop.RingNet[count].ring.Submit(0, &paraFlags)
+		loop.RingNet[count].ring.Submit(0, &paraFlags)
+
+		loop.RingNet[count].userDataList.Store(data2.id, data2)
 
 		if count < loop.RingCount-1 {
 			count++
@@ -71,7 +78,7 @@ func NewManyForAcceptor(addr NetAddress, size uint, sqpoll bool, num int, handle
 	for i := 0; i < num; i++ {
 		uringArray[i] = &URingNet{}
 		//uringArray[i].userDataMap = make(map[uint64]*UserData)
-		uringArray[i].ReadBuffer = make([]byte, 2048)
+		uringArray[i].ReadBuffer = make([]byte, 1024)
 		uringArray[i].WriteBuffer = make([]byte, 1024)
 		//uringArray[i].SocketFd = sockfd
 		uringArray[i].Addr = addr.Address
@@ -79,9 +86,9 @@ func NewManyForAcceptor(addr NetAddress, size uint, sqpoll bool, num int, handle
 		uringArray[i].Handler = handler
 
 		if sqpoll {
-			uringArray[i].SetUring(size, &uring.IOUringParams{Flags: uring.IORING_SETUP_SQPOLL, Features: uring.IORING_FEAT_FAST_POLL}) //Features: uring.IORING_FEAT_FAST_POLL})
+			uringArray[i].SetUring(size, &uring.IOUringParams{Flags: uring.IORING_SETUP_SQPOLL, Features: uring.IORING_FEAT_FAST_POLL | uring.IORING_FEAT_NODROP}) //Features: uring.IORING_FEAT_FAST_POLL})
 		} else {
-			uringArray[i].SetUring(size, nil)
+			uringArray[i].SetUring(size, &uring.IOUringParams{Features: uring.IORING_FEAT_FAST_POLL | uring.IORING_FEAT_NODROP})
 		}
 		fmt.Println("Uring instance initiated!")
 	}

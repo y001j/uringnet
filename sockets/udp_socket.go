@@ -24,7 +24,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"UringNet/errors"
+	"github.com/y001j/UringNet/errors"
 )
 
 // GetUDPSockAddr the structured addresses based on the protocol and raw address.

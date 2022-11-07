@@ -1,7 +1,8 @@
 package main
 
 import (
-	uring_net "UringNet/uring-net"
+	uring_net "UringNet"
+	socket "UringNet/sockets"
 	"github.com/evanphx/wildcat"
 	"log"
 	"os"
@@ -52,7 +53,7 @@ func (ts *testServer) OnTraffic(data *uring_net.UserData, ringnet uring_net.URin
 
 pipeline:
 
-	buffer := ringnet.ReadBuffer[:data.BufSize]
+	buffer := data.Buffer[:data.BufSize]
 
 	headerOffset, err := parser.Parse(buffer)
 
@@ -92,9 +93,9 @@ func main() {
 	//accptRingNet, _ := uring_net.New(uring_net.NetAddress{uring_net.TcpAddr, addr}, 500, true)
 
 	//server := &testServer{}
-	ringNets, _ := uring_net.NewManyForAcceptor(uring_net.NetAddress{uring_net.TcpAddr, addr}, 3200, true, 2, &testServer{}) //runtime.NumCPU()
+	ringNets, _ := uring_net.NewManyForAcceptor(uring_net.NetAddress{socket.Tcp4, addr}, 3200, true, 2, &testServer{}) //runtime.NumCPU()
 
-	loop := uring_net.SetLoops(ringNets)
+	loop := uring_net.SetLoops(ringNets, 3000)
 
 	//server.testloop = loop
 
@@ -102,9 +103,6 @@ func main() {
 
 	var waitgroup sync.WaitGroup
 	waitgroup.Add(1)
-
-	//RunMany(ringNets)
-	//ringNets[0].Run2()
 
 	//ringNets[0].EchoLoop()
 	//go ringNets[0].RunAccept(ringNets)
