@@ -125,8 +125,8 @@ func main() {
 	//accptRingNet, _ := uring_net.New(uring_net.NetAddress{uring_net.TcpAddr, addr}, 500, true)
 
 	//server := &testServer{}
-	options := socket.SocketOptions{}
-	ringNets, _ := UringNet.NewMany(UringNet.NetAddress{socket.Tcp4, addr}, 3200, false, 4, options, &testServer{}) //runtime.NumCPU()
+	options := socket.SocketOptions{TCPNoDelay: socket.TCPNoDelay, ReusePort: true}
+	ringNets, _ := UringNet.NewMany(UringNet.NetAddress{socket.Tcp4, addr}, 3200, false, 7, options, &testServer{}) //runtime.NumCPU()
 
 	loop := UringNet.SetLoops(ringNets, 4000)
 

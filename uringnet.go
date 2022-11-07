@@ -239,6 +239,7 @@ func (ringnet *URingNet) Run2(ringindex uint16) {
 			thedata.Buffer = ringnet.Autobuffer[offset][:]
 			thedata.BufSize = cqe.Result()
 			//fmt.Println(BytesToString(thedata.Buffer))
+			//log.Println("the buffer:", BytesToString(thedata.Buffer))
 			response(ringnet, thedata, ringindex, offset)
 			continue
 		case uint32(PrepareWriter):
@@ -298,10 +299,10 @@ func response(ringnet *URingNet, data *UserData, gid uint16, offset uint64) {
 		//br := temp.(*[]byte)
 		//br := make([]byte, 1024)
 		//br := bufferpool.Get().(*[]byte)
+		ringnet.addBuffer(offset, gid)
 		ringnet.read(data.Fd, sqe, gid)
 		//sqe.SetFlags(uring.IOSQE_ASYNC)
 		//ringnet.read2(data.Fd, sqe)
-		ringnet.addBuffer(offset, gid)
 
 		// recycle buffer
 		//ringnet.BufferPool.Put(thedata.buffer)
@@ -405,8 +406,8 @@ func (ringnet *URingNet) read(Fd int32, sqe *uring.SQEntry, ringIndex uint16) {
 	//data2.client = thedata.client
 	sqe.SetUserData(data2.id)
 
-	ioc := unix.Iovec{}
-	ioc.SetLen(1)
+	//ioc := unix.Iovec{}
+	//ioc.SetLen(1)
 
 	//Add read event
 	sqe.SetFlags(uring.IOSQE_BUFFER_SELECT)

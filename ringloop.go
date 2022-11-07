@@ -27,7 +27,7 @@ type Ringloop struct {
 }
 
 // set the buffer length, default buffer length is 1024
-const bufLength uint64 = 1024
+const bufLength uint64 = 2048
 
 // SetLoops
 //
