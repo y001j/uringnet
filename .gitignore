@@ -4,3 +4,6 @@ example/echoserver
 /bench/
 /uringhttp
 /bench/
+!/bench/gnetecho.go.bak
+!/bench/httpbench.go.bak
+!/bench/uringbench.go
