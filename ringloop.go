@@ -31,7 +31,7 @@ const bufLength uint64 = 2048
 
 // SetLoops
 //
-//	@Description:
+//	@Description: set the ringloop for the engine
 //	@param urings
 //	@return *Ringloop
 func SetLoops(urings []*URingNet, bufferSize int) *Ringloop {

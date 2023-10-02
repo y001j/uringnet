@@ -215,7 +215,7 @@ func (ringnet *URingNet) Run2(ringindex uint16) {
 			Fd := cqe.Result()
 			connect_num++
 			//log.Printf("URing Number: %d Client Conn %d: \n", ringindex, connect_num)
-			log.Println("URing Number: ", ringindex, " Client Conn %d:", connect_num)
+			//log.Println("URing Number: ", ringindex, " Client Conn %d:", connect_num)
 
 			sqe := ringnet.ring.GetSQEntry()
 			//claim buffer for read
@@ -275,32 +275,37 @@ func response(ringnet *URingNet, data *UserData, gid uint16, offset uint64) {
 
 	switch action {
 	case Echo: // Echo: First write and then add another read event into SQEs.
-		//fmt.Println("the buffer index ", offset)
-		//ringnet.addBuffer(offset)
-		//temp := BytesToString2(Buffers[cqe.Flags()>>uring.IORING_CQE_BUFFER_SHIFT])
-		//temp := Buffers[cqe.Flags()>>uring.IORING_CQE_BUFFER_SHIFT][:]
-		//fmt.Println(BytesToString(temp))
-		/// Add read event
-
-		//prepare write
-		//ringnet.Count++
-		//println("the worker run times: ", ringnet.Count)
 
 		sqe2 := ringnet.ring.GetSQEntry()
+
+		ringnet.Write(data, sqe2)
+
+		sqe := ringnet.ring.GetSQEntry()
+
 		// claim buffer for I/O write
 		//bw := ringnet.BufferPool.Get().(*[]byte)
 		//bw := make([]byte, 1024)
 		//sqe2.SetFlags(uring.IOSQE_IO_LINK)
-		ringnet.Write(data, sqe2)
+		ringnet.addBuffer(offset, gid)
+
+		var sqes []*uring.SQEntry
+		sqes = append(sqes, sqe)
+		//sqes = append(sqes, sqe6)
+		//sqes = append(sqes, sqe5)
+		//sqes = append(sqes, sqe7)
+
+		//ringnet.read_multi(data.Fd, sqes, gid)
+
+		ringnet.read(data.Fd, sqe, gid)
+
 		// "head offset: ", headerOffset)
-		sqe := ringnet.ring.GetSQEntry()
+
 		// claim buffer for I/O read
 		//temp := ringnet.BufferPool.Get()
 		//br := temp.(*[]byte)
 		//br := make([]byte, 1024)
 		//br := bufferpool.Get().(*[]byte)
-		ringnet.addBuffer(offset, gid)
-		ringnet.read(data.Fd, sqe, gid)
+
 		//sqe.SetFlags(uring.IOSQE_ASYNC)
 		//ringnet.read2(data.Fd, sqe)
 
@@ -337,7 +342,9 @@ func response(ringnet *URingNet, data *UserData, gid uint16, offset uint64) {
 		}
 	case Close:
 		sqe := ringnet.ring.GetSQEntry()
+		ringnet.addBuffer(offset, gid)
 		ringnet.close(data, sqe)
+
 	}
 	//  recover kernel buffer; the buffer should be restored after using.
 
@@ -372,7 +379,7 @@ func (ringnet *URingNet) Write(thedata *UserData, sqe2 *uring.SQEntry) {
 	sqe2.SetUserData(data1.id)
 	//sqe2.SetFlags(uring.IOSQE_IO_LINK)
 	uring.Write(sqe2, uintptr(data1.Fd), thedata.WriteBuf)
-	//ringnet.ring.Submit(0, &paraFlags)
+
 	//uring.Write(sqe2, uintptr(data1.Fd), thedata.Buffer) //data.WriteBuf)
 	//ringnet.ring.Submit(0, &paraFlags)
 }
@@ -425,6 +432,22 @@ func (ringnet *URingNet) read(Fd int32, sqe *uring.SQEntry, ringIndex uint16) {
 
 	//paraFlags = uring.IORING_SETUP_SQPOLL
 	ringnet.ring.Submit(0, &paraFlags)
+}
+
+func (ringnet *URingNet) read_multi(Fd int32, sqes []*uring.SQEntry, ringIndex uint16) {
+	data2 := makeUserData(prepareReader)
+	data2.Fd = Fd
+	for _, sqe := range sqes {
+		sqe.SetUserData(data2.id)
+
+		//Add read event
+		sqe.SetFlags(uring.IOSQE_BUFFER_SELECT)
+		sqe.SetBufGroup(ringIndex)
+		uring.ReadNoBuf(sqe, uintptr(Fd), uint32(bufLength))
+		ringnet.userDataList.Store(data2.id, data2)
+	}
+	//sqes的长度如何获取:
+	ringnet.ring.Submit(uint32(len(sqes)), &paraFlags)
 }
 
 func (ringnet *URingNet) read2(Fd int32, sqe *uring.SQEntry) {
@@ -516,14 +539,6 @@ func NewMany(addr NetAddress, size uint, sqpoll bool, num int, options socket.So
 		} else {
 			uringArray[i].SetUring(size, &uring.IOUringParams{Features: uring.IORING_FEAT_FAST_POLL | uring.IORING_FEAT_NODROP})
 		}
-		//uringArray[i].BufferPool = sync.Pool{
-		//	// New optionally specifies a function to generate
-		//	// a value when Get would otherwise return nil.
-		//	New: func() interface{} {
-		//		buf := make([]byte, 1024)
-		//		return &buf
-		//	},
-		//}
 		fmt.Println("Uring instance initiated!")
 	}
 	return uringArray, nil

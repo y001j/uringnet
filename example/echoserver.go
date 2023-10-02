@@ -4,6 +4,7 @@ import (
 	"github.com/y001j/UringNet"
 	socket "github.com/y001j/UringNet/sockets"
 	"os"
+	"runtime"
 	"sync"
 )
 
@@ -51,26 +52,15 @@ func (ts *testServer) OnOpen(data *UringNet.UserData) ([]byte, UringNet.Action) 
 func main() {
 	addr := os.Args[1]
 
-	//accptRingNet, _ := uring_net.New(uring_net.NetAddress{uring_net.TcpAddr, addr}, 500, true)
-
+	//accptRingNet, _ := uring_net.New(uring_net.NetAddress{uring_net., addr}, 500, true)
+	//TcpAddr
 	options := socket.SocketOptions{TCPNoDelay: socket.TCPNoDelay, ReusePort: true}
-	ringNets, _ := UringNet.NewMany(UringNet.NetAddress{socket.Tcp4, addr}, 3200, true, 8, options, &testServer{}) //runtime.NumCPU()
+	ringNets, _ := UringNet.NewMany(UringNet.NetAddress{socket.Tcp4, addr}, 3200, true, runtime.NumCPU()*2-2, options, &testServer{}) //runtime.NumCPU()
 
 	loop := UringNet.SetLoops(ringNets, 3000)
-
-	//server.testloop = loop
-
-	//loop := uring_net.SetLoop(ringNet)
-
 	var waitgroup sync.WaitGroup
 	waitgroup.Add(1)
 
-	//RunMany(ringNets)
-	//ringNets[0].Run2()
-
-	//ringNets[0].EchoLoop()
-	//go ringNets[0].RunAccept(ringNets)
-	//loop.RunManyRW()
 	loop.RunMany()
 
 	waitgroup.Wait()
