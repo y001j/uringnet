@@ -276,9 +276,11 @@ func response(ringnet *URingNet, data *UserData, gid uint16, offset uint64) {
 	switch action {
 	case Echo: // Echo: First write and then add another read event into SQEs.
 
-		sqe2 := ringnet.ring.GetSQEntry()
+		//sqe2 := ringnet.ring.GetSQEntry()
+		sqe1 := ringnet.ring.GetSQEntry()
 
-		ringnet.Write(data, sqe2)
+		//ringnet.Write(data, sqe2)
+		ringnet.Write(data, sqe1)
 
 		sqe := ringnet.ring.GetSQEntry()
 
@@ -286,13 +288,10 @@ func response(ringnet *URingNet, data *UserData, gid uint16, offset uint64) {
 		//bw := ringnet.BufferPool.Get().(*[]byte)
 		//bw := make([]byte, 1024)
 		//sqe2.SetFlags(uring.IOSQE_IO_LINK)
-		ringnet.addBuffer(offset, gid)
+		//ringnet.addBuffer(offset, gid)
 
 		var sqes []*uring.SQEntry
 		sqes = append(sqes, sqe)
-		//sqes = append(sqes, sqe6)
-		//sqes = append(sqes, sqe5)
-		//sqes = append(sqes, sqe7)
 
 		//ringnet.read_multi(data.Fd, sqes, gid)
 
@@ -417,10 +416,10 @@ func (ringnet *URingNet) read(Fd int32, sqe *uring.SQEntry, ringIndex uint16) {
 	//ioc.SetLen(1)
 
 	//Add read event
-	sqe.SetFlags(uring.IOSQE_BUFFER_SELECT)
-	sqe.SetBufGroup(ringIndex)
-	//uring.Read(sqe, uintptr(thedata.Fd), ringnet.ReadBuffer)
-	uring.ReadNoBuf(sqe, uintptr(Fd), uint32(bufLength))
+	//sqe.SetFlags(uring.IOSQE_BUFFER_SELECT)
+	//sqe.SetBufGroup(ringIndex)
+	uring.Read(sqe, uintptr(data2.Fd), ringnet.ReadBuffer)
+	//uring.ReadNoBuf(sqe, uintptr(Fd), uint32(bufLength))
 
 	//ringnet.userDataList.Store(data2.id, data2)
 	//co := conn{}
