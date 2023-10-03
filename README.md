@@ -8,15 +8,13 @@ UringNet is a high performance network I/O framework. It is light weighted and d
 
 ### Should You adopt it in your project
 
-Though UringNet is designed to be used in IoT platforms originally, but it does provide basic TCP and UDP network functions. If your project really need to handle extremely huge data traffic, you can give it a try. 
+Though UringNet is designed to be used in IoT platforms originally, it does provide basic TCP and UDP network functions. If your project really need to handle extremely huge data traffic, you can give it a try. 
 
 In most cases, you could just use more mature network frameworks, for example, Go [net](https://golang.org/pkg/net/)/[http](https://pkg.go.dev/net/http), [netty](https://netty.io/), [libuv](https://github.com/libuv/libuv).
 
 ## Get Started
 
-
-
-UringNet has full reference to the existing network framework like gnet, netty... some usage are similar like gnet.
+UringNet extensively references existing network frameworks such as gnet and Netty, with some usage patterns closely resembling those of gnet. Please note that UringNet is based on io_uring and, therefore, requires running on the Linux operating system with a kernel version higher than or equal to 5.1.
 
 ### Install UringNet:
 
@@ -152,3 +150,9 @@ Echo test tool: [wrk](https://github.com/wg/wrk)
 #### Test Result
 
 ![image-20221212113551004](https://pic.maienzx.com/qiniuPic/image-20221212113551004.png)
+
+## Known Issues
+
+> **Warning:** The project is still in development, there are still many bugs and performance issues. If you find any bugs or have any suggestions, please feel free to open an issue.
+
+During our performance tests with wrk, we observed that UringNet requires a warm-up period during HTTP stress testing. Typically, a warm-up time of around 5 minutes is necessary to ensure that the UringNet test code reaches its peak performance, which surpasses the current fastest framework by more than 10%. I am still investigating the root cause of this behavior.
