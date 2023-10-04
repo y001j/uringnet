@@ -170,7 +170,7 @@ func (ringnet *URingNet) Run2(ringindex uint16) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	ringnet.Handler.OnBoot(*ringnet)
-	var connect_num uint32 = 0
+	//var connect_num uint32 = 0
 	for {
 		cqe, err := ringnet.ring.GetCQEntry(1)
 
@@ -213,7 +213,7 @@ func (ringnet *URingNet) Run2(ringindex uint16) {
 			ringnet.Handler.OnOpen(thedata)
 			ringnet.EchoLoop()
 			Fd := cqe.Result()
-			connect_num++
+			//connect_num++
 			//log.Printf("URing Number: %d Client Conn %d: \n", ringindex, connect_num)
 			//log.Println("URing Number: ", ringindex, " Client Conn %d:", connect_num)
 
@@ -222,14 +222,15 @@ func (ringnet *URingNet) Run2(ringindex uint16) {
 			//buffer := make([]byte, 1024) //ringnet.BufferPool.Get().(*[]byte)
 			//temp := ringnet.BufferPool.Get()
 			//bb := temp.(*[]byte)
-			//ringnet.read2(Fd, sqe)
+			ringnet.read2(Fd, sqe)
 
-			ringnet.read(Fd, sqe, ringindex)
+			//ringnet.read(Fd, sqe, ringindex)
+			ringnet.userDataList.Delete(thedata.id)
 			continue
 			//recycle the buffer
 			//ringnet.BufferPool.Put(thedata.buffer)
 			//delete(ringnet.userDataMap, thedata.id)
-			ringnet.userDataList.Delete(thedata.id)
+
 		case uint32(prepareReader):
 			if cqe.Result() <= 0 {
 				continue
@@ -271,8 +272,6 @@ func response(ringnet *URingNet, data *UserData, gid uint16, offset uint64) {
 
 	action := ringnet.Handler.OnTraffic(data, *ringnet)
 
-	//var data2 *UserData
-
 	switch action {
 	case Echo: // Echo: First write and then add another read event into SQEs.
 
@@ -287,44 +286,29 @@ func response(ringnet *URingNet, data *UserData, gid uint16, offset uint64) {
 		// claim buffer for I/O write
 		//bw := ringnet.BufferPool.Get().(*[]byte)
 		//bw := make([]byte, 1024)
-		//sqe2.SetFlags(uring.IOSQE_IO_LINK)
+		//sqe.SetFlags(uring.IOSQE_IO_LINK)
 		//ringnet.addBuffer(offset, gid)
 
-		var sqes []*uring.SQEntry
-		sqes = append(sqes, sqe)
+		// we don't do multi-read here, It is not necessary.
+		//var sqes []*uring.SQEntry
+		//sqes = append(sqes, sqe)
 
 		//ringnet.read_multi(data.Fd, sqes, gid)
 
-		ringnet.read(data.Fd, sqe, gid)
+		ringnet.read2(data.Fd, sqe)
+		//fmt.Println("read is set for uring ", gid)
 
-		// "head offset: ", headerOffset)
-
-		// claim buffer for I/O read
-		//temp := ringnet.BufferPool.Get()
-		//br := temp.(*[]byte)
-		//br := make([]byte, 1024)
-		//br := bufferpool.Get().(*[]byte)
-
-		//sqe.SetFlags(uring.IOSQE_ASYNC)
-		//ringnet.read2(data.Fd, sqe)
-
-		// recycle buffer
-		//ringnet.BufferPool.Put(thedata.buffer)
-		//ringnet.BufferPool.Put(thedata.buffer)
-
-	//ringnet.ringloop.GetBuffer()[offset]
-	//writeBuf = ringnet.ringloop.GetBuffer()[offset][:] //[]byte("HTTP/1.1 200 OK\r\nContent-Length: 50\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n<title>OK</title><body>I am great to do it!</body>") //Date: Sat, 17 Sep 2022 07:54:22 GMT
-	//buf := ringnet.ringloop.buffer[offset][:]
-	//StringToBytes2
-	//ringnet.ringloop.buffer[offset]
-
-	//test := append(buf, data.WriteBuf)
-	//sqe.SetAddr()
-	//EchoAndClose type just send a write event into SQEs and then close the socket connection. the write and close event should be linked together.
-	case Read: // Echo: First write and then add another read event into SQEs.
+	case Read:
 		sqe := ringnet.ring.GetSQEntry()
-		//log.Println(sqe.UserData())
-		ringnet.read(data.Fd, sqe, gid)
+		ringnet.read2(data.Fd, sqe)
+	case Write:
+		sqe1 := ringnet.ring.GetSQEntry()
+		ringnet.Write(data, sqe1)
+		_, err := ringnet.ring.Submit(0, &paraFlags)
+		if err != nil {
+			fmt.Println("Error Message: ", err)
+		}
+		//EchoAndClose type just send a write event into SQEs and then close the socket connection. the write and close event should be linked together.
 	case EchoAndClose:
 		sqe2 := ringnet.ring.GetSQEntry()
 		// claim buffer for I/O write
@@ -416,10 +400,10 @@ func (ringnet *URingNet) read(Fd int32, sqe *uring.SQEntry, ringIndex uint16) {
 	//ioc.SetLen(1)
 
 	//Add read event
-	//sqe.SetFlags(uring.IOSQE_BUFFER_SELECT)
-	//sqe.SetBufGroup(ringIndex)
-	uring.Read(sqe, uintptr(data2.Fd), ringnet.ReadBuffer)
-	//uring.ReadNoBuf(sqe, uintptr(Fd), uint32(bufLength))
+	sqe.SetFlags(uring.IOSQE_BUFFER_SELECT)
+	sqe.SetBufGroup(ringIndex)
+	//uring.Read(sqe, uintptr(data2.Fd), ringnet.ReadBuffer)
+	uring.ReadNoBuf(sqe, uintptr(Fd), uint32(bufLength))
 
 	//ringnet.userDataList.Store(data2.id, data2)
 	//co := conn{}
@@ -449,6 +433,7 @@ func (ringnet *URingNet) read_multi(Fd int32, sqes []*uring.SQEntry, ringIndex u
 	ringnet.ring.Submit(uint32(len(sqes)), &paraFlags)
 }
 
+// this function is used to read data from the network socket without auto buffer.
 func (ringnet *URingNet) read2(Fd int32, sqe *uring.SQEntry) {
 	data2 := makeUserData(prepareReader)
 	data2.Fd = Fd
@@ -456,11 +441,9 @@ func (ringnet *URingNet) read2(Fd int32, sqe *uring.SQEntry) {
 
 	//data2.Buffer = make([]byte, 1024)
 	//ringnet.userDataMap[data2.id] = data2
-	_, loaded := ringnet.userDataList.LoadOrStore(data2.id, data2)
-	if loaded {
-		log.Println("data has been loaded!")
-	}
-	//sqe.SetLen(1)
+	ringnet.userDataList.Store(data2.id, data2)
+	//sqe.SetFlags(uring.IOSQE_BUFFER_SELECT)
+	//sqe.SetBufGroup(0)
 	uring.Read(sqe, uintptr(Fd), ringnet.ReadBuffer)
 
 	ringnet.ring.Submit(0, &paraFlags)

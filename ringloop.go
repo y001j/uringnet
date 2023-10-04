@@ -59,7 +59,7 @@ func SetLoops(urings []*URingNet, bufferSize int) *Ringloop {
 		fmt.Println("Add Kernel buffer... for ring ", i)
 		//theloop.ringNet.userDataMap[data.id] = data
 		//paraFlags = uring.IORING_SETUP_SQPOLL
-		_, _ = theloop.RingNet[0].ring.Submit(1, &paraFlags)
+		_, _ = theloop.RingNet[i].ring.Submit(1, &paraFlags)
 		//theloop.RingNet[i].ringloop
 	}
 	return theloop
@@ -135,6 +135,7 @@ const (
 	Echo
 	Read
 	EchoAndClose // response then close
+	Write
 	//Close: the connection.
 	Close
 

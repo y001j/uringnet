@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"errors"
 	"github.com/y001j/UringNet"
 	socket "github.com/y001j/UringNet/sockets"
 	"os"
@@ -21,12 +20,6 @@ type testServer struct {
 type httpCodec struct {
 	delimiter []byte
 	buf       []byte
-}
-
-func (hc *httpCodec) appendResponse() {
-	hc.buf = append(hc.buf, "HTTP/1.1 200 OK\r\nServer: gnet\r\nContent-Type: text/plain\r\nDate: Mon, 02 Jan 2022 15:04:05 GMT"...)
-	//hc.buf = time.Now().AppendFormat(hc.buf, "Mon, 02 Jan 2006 15:04:05 GMT")
-	hc.buf = append(hc.buf, "\r\nContent-Length: 12\r\n\r\nHello World!"...)
 }
 
 func appendResponse(hc *[]byte) {
@@ -67,18 +60,18 @@ func (ts *testServer) OnWritten(data UringNet.UserData) UringNet.Action {
 	return UringNet.None
 }
 
-func (hc *httpCodec) parse(data []byte) (int, error) {
-	if idx := bytes.Index(data, hc.delimiter); idx != -1 {
-		return idx + 4, nil
-	}
-	return -1, errCRLFNotFound
-}
-
-func (hc *httpCodec) reset() {
-	hc.buf = hc.buf[:0]
-}
-
-var errCRLFNotFound = errors.New("CRLF not found")
+//func (hc *httpCodec) parse(data []byte) (int, error) {
+//	if idx := bytes.Index(data, hc.delimiter); idx != -1 {
+//		return idx + 4, nil
+//	}
+//	return -1, errCRLFNotFound
+//}
+//
+//func (hc *httpCodec) reset() {
+//	hc.buf = hc.buf[:0]
+//}
+//
+//var errCRLFNotFound = errors.New("CRLF not found")
 
 func (ts *testServer) OnOpen(data *UringNet.UserData) ([]byte, UringNet.Action) {
 
@@ -91,7 +84,7 @@ func main() {
 	//runtime.GOMAXPROCS(runtime.NumCPU()*2 - 1)
 
 	options := socket.SocketOptions{TCPNoDelay: socket.TCPNoDelay, ReusePort: true}
-	ringNets, _ := UringNet.NewMany(UringNet.NetAddress{socket.Tcp4, addr}, 3200, true, 6, options, &testServer{}) //runtime.NumCPU()
+	ringNets, _ := UringNet.NewMany(UringNet.NetAddress{socket.Tcp4, addr}, 3200, true, 4, options, &testServer{}) //runtime.NumCPU()
 
 	loop := UringNet.SetLoops(ringNets, 4000)
 
