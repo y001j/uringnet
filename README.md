@@ -115,7 +115,7 @@ Echo test tool: [rust echo bench](https://github.com/haraldh/rust_echo_bench)
 
 #### Test Result
 
-![echotest](https://pic.maienzx.com/qiniuPic/image-20221212113953215.png)
+![echo](https://pic.maienzx.com/qiniuPic/202211061218743.png)
 
 ### HTTP Stress Testing
 
