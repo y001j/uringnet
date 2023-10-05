@@ -6,7 +6,7 @@
 
 ### Why I created this 
 
-UringNet is a high performance network I/O framework. It is light weighted and developed by Golang. The foundation of UringNet is [io_uring](https://kernel.dk/io_uring.pdf) - a new async IO interface - from Linux Kernel since version 5.1 in 2019. This project just comes from experimental projects in my edge computing and IoT research. I am just want to find a way to build a simple but high performance network package transmit tool in IoT gateways. I have tried traditional select/epoll and then tried io_uring, finally , the io_uring get much better performance. 
+UringNet is a high performance network I/O framework. It is light weighted and developed by Golang. The foundation of UringNet is [io_uring](https://kernel.dk/io_uring.pdf) - a new async IO interface - from Linux Kernel since version 5.1 in 2019. This project just comes from experimental projects in my edge computing and IoT research. I am just want to find a way to build a simple but high performance network package transmit tool in IoT gateways. I have tried traditional select/epoll and then tried io_uring, finally , the io_uring get much better performance. In most cases, the performance improvement ranges from **10% to 30%**, while in the most extreme case, the performance improvement can reach up to 66%.
 
 ### Should You adopt it in your project
 
@@ -115,7 +115,7 @@ Echo test tool: [rust echo bench](https://github.com/haraldh/rust_echo_bench)
 
 #### Test Result
 
-![echotest](https://pic.maienzx.com/qiniuPic/image-20221212113953215.png)
+![echo](https://pic.maienzx.com/qiniuPic/202211061218743.png)
 
 ### HTTP Stress Testing
 
