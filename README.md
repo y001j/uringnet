@@ -1,6 +1,6 @@
 # UringNet
 
-![logo](https://pic.maienzx.com/qiniuPic/202310031719836.png)
+![logo](http://pic.maienzx.com/qiniuPic/202310031719836.png)
 
 ## Introduction
 
@@ -115,7 +115,7 @@ Echo test tool: [rust echo bench](https://github.com/haraldh/rust_echo_bench)
 
 #### Test Result
 
-![image-20221212113953215](https://pic.maienzx.com/qiniuPic/image-20221212113953215.png)
+![echotest](https://pic.maienzx.com/qiniuPic/image-20221212113953215.png)
 
 ### HTTP Stress Testing
 
