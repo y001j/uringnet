@@ -46,7 +46,7 @@ type URingNet struct {
 	ReadBuffer        []byte
 	WriteBuffer       []byte
 
-	Autobuffer [][bufLength]byte
+	Autobuffer [][bufLength]byte // it is just prepared for auto buffer of io_uring
 
 	ringloop *Ringloop
 
@@ -89,6 +89,7 @@ type UserData struct {
 	// for accept socket
 	ClientSock *syscall.RawSockaddrAny
 	socklen    *uint32
+
 	//Bytebuffer bytes.Buffer
 
 	//r0 interface{}
@@ -133,13 +134,10 @@ func makeUserData(state UserdataState) *UserData {
 
 	//userData.id = uint64(uintptr(unsafe.Pointer(userData)))
 	//userData.Bytebuffer = new(bytes.Buffer)
-	//userData.id = increase
-	//rand.Seed(int64(uintptr(unsafe.Pointer(userData))))
-	//time.Now().UnixNano()
+	//random := rand.New(rand.NewSource(int64(uintptr(unsafe.Pointer(userData)))))
+	//userData.id = uint64(rand.Int63())
 	userData.id = increase
-	//log.Println("userdata id", increase)
 	increase++
-	//userData.request.id = userData.id
 
 	return userData
 }
@@ -278,8 +276,8 @@ func response(ringnet *URingNet, data *UserData, gid uint16, offset uint64) {
 		//sqe2 := ringnet.ring.GetSQEntry()
 		sqe1 := ringnet.ring.GetSQEntry()
 
-		//ringnet.Write(data, sqe2)
-		ringnet.Write(data, sqe1)
+		//ringnet.write(data, sqe2)
+		ringnet.write(data, sqe1)
 
 		sqe := ringnet.ring.GetSQEntry()
 
@@ -303,7 +301,7 @@ func response(ringnet *URingNet, data *UserData, gid uint16, offset uint64) {
 		ringnet.read2(data.Fd, sqe)
 	case Write:
 		sqe1 := ringnet.ring.GetSQEntry()
-		ringnet.Write(data, sqe1)
+		ringnet.write(data, sqe1)
 		_, err := ringnet.ring.Submit(0, &paraFlags)
 		if err != nil {
 			fmt.Println("Error Message: ", err)
@@ -315,7 +313,7 @@ func response(ringnet *URingNet, data *UserData, gid uint16, offset uint64) {
 		//bw := ringnet.BufferPool.Get().(*[]byte)
 		//bw := make([]byte, 1024)
 		//sqe2.SetFlags(uring.IOSQE_IO_LINK)
-		ringnet.Write(data, sqe2)
+		ringnet.write(data, sqe2)
 		sqe := ringnet.ring.GetSQEntry()
 		sqe.SetFlags(uring.IOSQE_IO_DRAIN)
 		ringnet.close(data, sqe)
@@ -350,7 +348,7 @@ func (ringnet *URingNet) close(thedata *UserData, sqe *uring.SQEntry) {
 	//return data
 }
 
-func (ringnet *URingNet) Write(thedata *UserData, sqe2 *uring.SQEntry) {
+func (ringnet *URingNet) write(thedata *UserData, sqe2 *uring.SQEntry) {
 	data1 := makeUserData(PrepareWriter)
 	data1.Fd = thedata.Fd
 	//thebuffer := make([]byte, 1024)
@@ -363,10 +361,10 @@ func (ringnet *URingNet) Write(thedata *UserData, sqe2 *uring.SQEntry) {
 	//sqe2.SetFlags(uring.IOSQE_IO_LINK)
 	uring.Write(sqe2, uintptr(data1.Fd), thedata.WriteBuf)
 
-	//uring.Write(sqe2, uintptr(data1.Fd), thedata.Buffer) //data.WriteBuf)
+	//uring.write(sqe2, uintptr(data1.Fd), thedata.Buffer) //data.WriteBuf)
 	//ringnet.ring.Submit(0, &paraFlags)
 }
-func (ringnet *URingNet) Write2(Fd int32, buffer []byte) {
+func (ringnet *URingNet) write2(Fd int32, buffer []byte) {
 	sqe2 := ringnet.ring.GetSQEntry()
 	data1 := makeUserData(PrepareWriter)
 	data1.Fd = Fd
@@ -381,13 +379,7 @@ func (ringnet *URingNet) Write2(Fd int32, buffer []byte) {
 
 }
 
-// read
-//
-//	@Description:
-//	@receiver ringnet
-//	@param thedata
-//	@param sqe
-//	@param ioc
+// read method when using auto buffer
 func (ringnet *URingNet) read(Fd int32, sqe *uring.SQEntry, ringIndex uint16) {
 	data2 := makeUserData(prepareReader)
 	data2.Fd = Fd

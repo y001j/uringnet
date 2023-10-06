@@ -93,7 +93,6 @@ func (ringNet *URingNet) EchoLoop() {
 	ringNet.userDataList.Store(data.id, data)
 	//ringNet.userDataMap[data.id] = data
 	//set client address in data.client
-	//uring.Accept(sqe, uintptr(ringNet.SocketFd), data.ClientSock, data.socklen) //&data.client)
 	uring.Accept(sqe, uintptr(ringNet.SocketFd), nil, nil)
 	_, err := ringNet.ring.Submit(0, &paraFlags)
 

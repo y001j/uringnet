@@ -28,6 +28,7 @@ func Read(sqe *SQEntry, fd uintptr, buf []byte) {
 	sqe.len = uint32(len(buf))
 }
 
+// If you want to use auto-buffer group, you should use the following functions
 func ReadNoBuf(sqe *SQEntry, fd uintptr, length uint32) {
 	sqe.opcode = IORING_OP_READ
 	sqe.fd = int32(fd)

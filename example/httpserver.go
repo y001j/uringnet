@@ -6,6 +6,7 @@ import (
 	socket "github.com/y001j/UringNet/sockets"
 	"os"
 	"sync"
+	"time"
 )
 
 type testServer struct {
@@ -23,8 +24,8 @@ type httpCodec struct {
 }
 
 func appendResponse(hc *[]byte) {
-	*hc = append(*hc, "HTTP/1.1 200 OK\r\nServer: uringNet\r\nContent-Type: text/plain\r\nDate: Mon, 02 Jan 2022 15:04:05 GMT"...)
-	//*hc = time.Now().AppendFormat(*hc, "Mon, 02 Jan 2006 15:04:05 GMT")
+	*hc = append(*hc, "HTTP/1.1 200 OK\r\nServer: uringNet\r\nContent-Type: text/plain\r\nDate: "...)
+	*hc = time.Now().AppendFormat(*hc, "Mon, 02 Jan 2006 15:04:05 GMT")
 	*hc = append(*hc, "\r\nContent-Length: 12\r\n\r\nHello World!"...)
 }
 
