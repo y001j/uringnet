@@ -1,11 +1,13 @@
-// Package uring_net
-// @Description:
+//go:build linux
+// +build linux
+
 package UringNet
 
 import (
 	"crypto/tls"
 	"fmt"
 	socket "github.com/y001j/UringNet/sockets"
+	"github.com/y001j/UringNet/uring"
 	"golang.org/x/sys/unix"
 	"log"
 	"net"
@@ -15,7 +17,6 @@ import (
 	"syscall"
 	"time"
 	"unsafe"
-	"uring"
 )
 
 type URingNet struct {

@@ -2,9 +2,9 @@ package UringNet
 
 import (
 	"fmt"
+	"github.com/y001j/UringNet/uring"
 	"log"
 	"net"
-	"uring"
 )
 
 var netFdChan = make(chan int, 10)

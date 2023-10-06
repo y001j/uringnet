@@ -3,13 +3,13 @@ package UringNet
 import (
 	"bytes"
 	"fmt"
+	"github.com/y001j/UringNet/uring"
 	"golang.org/x/sys/unix"
 	"io"
 	"net"
 	"sync"
 	"syscall"
 	"time"
-	"uring"
 )
 
 type Ringloop struct {
