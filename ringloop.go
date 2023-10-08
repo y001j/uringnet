@@ -1,3 +1,6 @@
+//go:build linux
+// +build linux
+
 package UringNet
 
 import (
@@ -57,8 +60,6 @@ func SetLoops(urings []*URingNet, bufferSize int) *Ringloop {
 		theloop.RingNet[i].userDataList.Store(data.id, data)
 		//theloop.RingNet[i].userDataMap[data.id] = data
 		fmt.Println("Add Kernel buffer... for ring ", i)
-		//theloop.ringNet.userDataMap[data.id] = data
-		//paraFlags = uring.IORING_SETUP_SQPOLL
 		_, _ = theloop.RingNet[i].ring.Submit(1, &paraFlags)
 		//theloop.RingNet[i].ringloop
 	}
@@ -72,16 +73,8 @@ func (loop *Ringloop) GetBuffer() [][bufLength]byte {
 // Create a accept event  for the loop.
 // the accept should be set every time when server is initiated.
 func (ringNet *URingNet) EchoLoop() {
-	//socketfd := ListenTCPSocket(NetAddress{TcpAddr, "127.0.0.1:50001"})
 
-	//in := make([]byte, 100)
-	//in2 := make([]byte, 100)
 	sqe := ringNet.ring.GetSQEntry()
-	//Read(sqe, pathDir.Fd(), in)
-	//var client unix.RawSockaddrAny
-
-	//ringNet.ClientSock = &unix.RawSockaddrAny{}
-
 	data := makeUserData(accepted)
 	var len uint32 = unix.SizeofSockaddrAny
 	data.ClientSock = &syscall.RawSockaddrAny{}
@@ -112,18 +105,20 @@ func (loop *Ringloop) RunMany() {
 	}
 }
 
+func (loop *Ringloop) RunMany2() {
+
+	for i := 0; i < int(loop.RingCount); i++ {
+		loop.RingNet[i].EchoLoop()
+		go loop.RingNet[i].Run(uint16(i))
+	}
+}
+
 func (loop *Ringloop) RunManyAcceptor() {
 	for i := 0; i < int(loop.RingCount); i++ {
 		go loop.RingNet[i].Run2(uint16(i))
 	}
 	go loop.GetConnects(loop.RingNet[0].Addr)
 }
-
-//func (loop *Ringloop) RunManyRW() {
-//	for i := 1; i < int(loop.RingCount); i++ {
-//		go loop.RingNet[i].RunReadWrite()
-//	}
-//}
 
 // Action is an action that occurs after the completion of an event.
 type Action int
@@ -135,8 +130,7 @@ const (
 	Read
 	EchoAndClose // response then close
 	Write
-	//Close: the connection.
-	Close
+	Close //Close the connection.
 
 	// Shutdown shutdowns the engine.
 	Shutdown

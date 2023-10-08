@@ -27,6 +27,7 @@ func bytes2iovec(bs [][]byte) []unix.Iovec {
 
 type Socklen uint
 
+// SockaddrToAny converts a Sockaddr to a RawSockaddrAny.
 func sockaddrToAny(sa unix.Sockaddr) (*unix.RawSockaddrAny, Socklen, error) {
 	if sa == nil {
 		return nil, 0, syscall.EINVAL
