@@ -40,7 +40,6 @@ type URingNet struct {
 	nextProtoErr      error
 	ring              uring.Ring
 	userDataList      sync.Map // all the userdata
-	userDataMap       map[uint64]*UserData
 	ReadBuffer        []byte
 	WriteBuffer       []byte
 
@@ -152,18 +151,12 @@ func (ringNet *URingNet) Run2(ringing uint16) {
 	ringNet.Handler.OnBoot(*ringNet)
 	//var connect_num uint32 = 0
 	for {
+		// 1. get a CQE in the completion queue,
 		cqe, err := ringNet.ring.GetCQEntry(1)
 
-		//defer ringnet.ring.Close()
-		// have accepted
-		//theFd := ringnet.Fd.Load()
-		//if theFd != 0 {
-		//	sqe := ringnet.ring.GetSQEntry()
-		//	ringnet.read(int32(theFd), sqe, ringindex)
-		//	ringnet.Fd.Store(0)
-		//}
-
+		// 2. if there is no CQE, then continue to get CQE
 		if err != nil {
+			// 2.1 if there is no CQE, except EAGAIN, then continue to get CQE
 			if err == unix.EAGAIN {
 				//log.Println("Completion queue is empty!")
 				continue
@@ -172,9 +165,8 @@ func (ringNet *URingNet) Run2(ringing uint16) {
 			continue
 		}
 
+		// 3. get the userdata from the map,
 		data, suc := ringNet.userDataList.Load(cqe.UserData())
-
-		//data, suc := ringnet.userDataMap[cqe.UserData()]
 		if !suc {
 			//log.Println("Cannot find matched userdata!")
 			//ringnet.ring.Flush()
@@ -217,7 +209,8 @@ func (ringNet *URingNet) Run2(ringing uint16) {
 			}
 			//fmt.Println(BytesToString(thedata.Buffer))
 			//log.Println("the buffer:", BytesToString(thedata.Buffer))
-			response(ringNet, thedata, ringing, 0)
+			action := ringNet.Handler.OnTraffic(thedata, *ringNet)
+			response(ringNet, thedata, action)
 			continue
 		case uint32(PrepareWriter):
 			if cqe.Result() <= 0 {
@@ -239,7 +232,6 @@ func (ringNet *URingNet) Run(ringing uint16) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	ringNet.Handler.OnBoot(*ringNet)
-	//var connect_num uint32 = 0
 	for {
 		cqe, err := ringNet.ring.GetCQEntry(1)
 
@@ -333,13 +325,13 @@ func (ringNet *URingNet) ShutDown() {
 	ringNet.inShutdown = 1
 	ringNet.ReadBuffer = nil
 	ringNet.WriteBuffer = nil
-	ringNet.userDataMap = nil
+	//ringNet.userDataMap = nil
 	ringNet.Handler.OnShutdown(*ringNet)
 }
 
-func response(ringnet *URingNet, data *UserData, gid uint16, offset uint64) {
+func response(ringnet *URingNet, data *UserData, action Action) {
 
-	action := ringnet.Handler.OnTraffic(data, *ringnet)
+	//action := ringnet.Handler.OnTraffic(data, *ringnet)
 
 	switch action {
 	case Echo: // Echo: First write and then add another read event into SQEs.
@@ -566,7 +558,7 @@ func New(addr NetAddress, size uint, sqpoll bool, options socket.SocketOptions) 
 	//1. set the socket
 	//var ringNet *URingNet
 	ringNet := &URingNet{}
-	ringNet.userDataMap = make(map[uint64]*UserData)
+	//ringNet.userDataMap = make(map[uint64]*UserData)
 	ops := socket.SetOptions(string(addr.AddrType), options)
 	switch addr.AddrType {
 	case socket.Tcp, socket.Tcp4, socket.Tcp6:
@@ -593,14 +585,7 @@ func New(addr NetAddress, size uint, sqpoll bool, options socket.SocketOptions) 
 }
 
 // NewMany Create multiple uring instances
-//
-//	@Description:
-//	@param addr
-//	@param size set SQ size
-//	@param sqpoll if set sqpoll to true, io_uring submit SQs automatically  without enter syscall.
-//	@param num number of io_uring instances need to be created
-//	@return *[]URingNet
-//	@return error
+// the size of ringnet array should be equal to the number of CPU cores+-1.
 func NewMany(addr NetAddress, size uint, sqpoll bool, num int, options socket.SocketOptions, handler EventHandler) ([]*URingNet, error) {
 	//1. set the socket
 	var sockfd int
@@ -629,9 +614,9 @@ func NewMany(addr NetAddress, size uint, sqpoll bool, num int, options socket.So
 		uringArray[i].Handler = handler
 
 		if sqpoll {
-			uringArray[i].SetUring(size, &uring.IOUringParams{Flags: uring.IORING_SETUP_SQPOLL, Features: uring.IORING_FEAT_FAST_POLL | uring.IORING_FEAT_NODROP}) //Features: uring.IORING_FEAT_FAST_POLL})
+			uringArray[i].SetUring(size, &uring.IOUringParams{Flags: uring.IORING_SETUP_SQPOLL, Features: uring.IORING_FEAT_FAST_POLL | uring.IORING_FEAT_NODROP | uring.IORING_FEAT_SINGLE_MMAP}) //Features: uring.IORING_FEAT_FAST_POLL})
 		} else {
-			uringArray[i].SetUring(size, &uring.IOUringParams{Features: uring.IORING_FEAT_FAST_POLL | uring.IORING_FEAT_NODROP})
+			uringArray[i].SetUring(size, &uring.IOUringParams{Features: uring.IORING_FEAT_FAST_POLL | uring.IORING_FEAT_NODROP | uring.IORING_FEAT_SINGLE_MMAP})
 		}
 		fmt.Println("Uring instance initiated!")
 	}
