@@ -5,6 +5,7 @@ import (
 	"github.com/y001j/UringNet"
 	"github.com/y001j/UringNet/sockets"
 	"os"
+	"runtime"
 	"sync"
 	"time"
 )
@@ -82,10 +83,10 @@ func (ts *testServer) OnOpen(data *UringNet.UserData) ([]byte, UringNet.Action) 
 
 func main() {
 	addr := os.Args[1]
-	//runtime.GOMAXPROCS(runtime.NumCPU()*2 - 1)
+	//runtime.GOMAXPROCS(runtime.NumCPU())
 
 	options := socket.SocketOptions{TCPNoDelay: socket.TCPNoDelay, ReusePort: true}
-	ringNets, _ := UringNet.NewMany(UringNet.NetAddress{socket.Tcp4, addr}, 3200, true, 1, options, &testServer{}) //runtime.NumCPU()
+	ringNets, _ := UringNet.NewMany(UringNet.NetAddress{socket.Tcp4, addr}, 3200, true, runtime.NumCPU(), options, &testServer{}) //runtime.NumCPU()
 
 	loop := UringNet.SetLoops(ringNets, 4000)
 
