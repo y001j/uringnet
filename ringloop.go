@@ -1,5 +1,4 @@
 //go:build linux
-// +build linux
 
 package UringNet
 
@@ -7,6 +6,7 @@ import (
 	"bytes"
 	"fmt"
 	"github.com/y001j/UringNet/uring"
+
 	"golang.org/x/sys/unix"
 	"io"
 	"net"
@@ -51,17 +51,13 @@ func SetLoops(urings []*URingNet, bufferSize int) *Ringloop {
 
 		//set buffer
 		sqe2 := theloop.RingNet[i].ring.GetSQEntry()
-		//Buffers := make([][]byte, 1024, 1024)
-		//tempb := Init2DSlice(1024, 1024)
 		urings[i].Autobuffer = make([][bufLength]byte, bufferSize)
 		uring.ProvideBuf(sqe2, urings[i].Autobuffer, uint32(bufferSize), uint32(bufLength), uint16(i))
 		data := makeUserData(provideBuffer)
 		sqe2.SetUserData(data.id)
 		theloop.RingNet[i].userDataList.Store(data.id, data)
-		//theloop.RingNet[i].userDataMap[data.id] = data
 		fmt.Println("Add Kernel buffer... for ring ", i)
 		_, _ = theloop.RingNet[i].ring.Submit(1, &paraFlags)
-		//theloop.RingNet[i].ringloop
 	}
 	return theloop
 }
@@ -70,15 +66,16 @@ func (loop *Ringloop) GetBuffer() [][bufLength]byte {
 	return loop.buffer
 }
 
-// Create a accept event  for the loop.
-// the accept should be set every time when server is initiated.
+// EchoLoop Create an accept event  for the loop.
+// to accept should be set every time when server is initiated.
 func (ringNet *URingNet) EchoLoop() {
 
 	sqe := ringNet.ring.GetSQEntry()
 	data := makeUserData(accepted)
-	var len uint32 = unix.SizeofSockaddrAny
+	// len  := unix.SizeofSockaddrAny
+	length := uint32(unix.SizeofSockaddrAny)
 	data.ClientSock = &syscall.RawSockaddrAny{}
-	data.socklen = &len
+	data.socklen = &length
 	sqe.SetUserData(data.id)
 
 	//sqe.SetAddr()
@@ -113,13 +110,6 @@ func (loop *Ringloop) RunMany2() {
 	}
 }
 
-func (loop *Ringloop) RunManyAcceptor() {
-	for i := 0; i < int(loop.RingCount); i++ {
-		go loop.RingNet[i].Run2(uint16(i))
-	}
-	go loop.GetConnects(loop.RingNet[0].Addr)
-}
-
 // Action is an action that occurs after the completion of an event.
 type Action int
 
@@ -131,9 +121,6 @@ const (
 	EchoAndClose // response then close
 	Write
 	Close //Close the connection.
-
-	// Shutdown shutdowns the engine.
-	Shutdown
 )
 
 // Reader is an interface that consists of a number of methods for reading that Conn must implement.
@@ -303,14 +290,14 @@ type (
 	EventHandler interface {
 		// OnBoot fires when the engine is ready for accepting connections.
 		// The parameter engine has information and various utilities.
-		OnBoot(eng URingNet) (action Action)
+		OnBoot(eng *URingNet) (action Action)
 
 		// OnShutdown fires when the engine is being shut down, it is called right after
 		// all event-loops and connections are closed.
-		OnShutdown(eng URingNet)
+		OnShutdown(eng *URingNet)
 
 		// OnOpen fires when a new connection has been opened.
-		// The Conn c has information about the connection such as it's local and remote address.
+		// The Conn c has information about the connection such as its local and remote address.
 		// The parameter out is the return value which is going to be sent back to the peer.
 		// It is usually not recommended to send large amounts of data back to the peer in OnOpened.
 		//
@@ -327,7 +314,7 @@ type (
 		// as this []byte will be reused within event-loop after React() returns.
 		// If you have to use packet in a new goroutine, then you need to make a copy of buf and pass this copy
 		// to that new goroutine.
-		OnTraffic(data *UserData, eng URingNet) (action Action)
+		OnTraffic(data *UserData, eng *URingNet) (action Action)
 
 		// OnTick fires immediately after the engine starts and will fire again
 		// following the duration specified by the delay return value.
@@ -353,13 +340,13 @@ type (
 
 // OnBoot fires when the engine is ready for accepting connections.
 // The parameter engine has information and various utilities.
-func (es *BuiltinEventEngine) OnBoot(_ URingNet) (action Action) {
+func (es *BuiltinEventEngine) OnBoot(_ *URingNet) (action Action) {
 	return
 }
 
 // OnShutdown fires when the engine is being shut down, it is called right after
 // all event-loops and connections are closed.
-func (es *BuiltinEventEngine) OnShutdown(_ URingNet) {
+func (es *BuiltinEventEngine) OnShutdown(_ *URingNet) {
 }
 
 // OnOpen fires when a new connection has been opened.
@@ -375,7 +362,7 @@ func (es *BuiltinEventEngine) OnClose(_ UserData) (action Action) {
 }
 
 // OnTraffic fires when a local socket receives data from the peer.
-func (es *BuiltinEventEngine) OnTraffic(_ *UserData, _ URingNet) (action Action) {
+func (es *BuiltinEventEngine) OnTraffic(_ *UserData, _ *URingNet) (action Action) {
 	return
 }
 
