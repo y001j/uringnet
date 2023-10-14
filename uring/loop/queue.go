@@ -6,9 +6,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
-	"time"
-
-	"uring"
 )
 
 var (
@@ -30,7 +27,7 @@ type result struct {
 	free  uint32
 	nonce uint32
 
-	uring.CQEntry
+	CQEntry
 	ch chan struct{}
 }
 
@@ -46,9 +43,9 @@ func (r *result) setFree() {
 	atomic.StoreUint32(&r.free, 0)
 }
 
-type SQOperation func(sqe *uring.SQEntry)
+type SQOperation func(sqe *SQEntry)
 
-func newQueue(ring *uring.Ring, qp *Params) *queue {
+func newQueue(ring *Ring, qp *Params) *queue {
 	var (
 		minComplete uint32
 	)
@@ -77,7 +74,7 @@ func newQueue(ring *uring.Ring, qp *Params) *queue {
 
 // queue provides thread safe access to uring.Ring instance.
 type queue struct {
-	ring        *uring.Ring
+	ring        *Ring
 	minComplete uint32
 
 	submissionTimer time.Duration
@@ -218,7 +215,7 @@ func (q *queue) prepare(n uint32) error {
 	return nil
 }
 
-func (q *queue) getSQEntry() *uring.SQEntry {
+func (q *queue) getSQEntry() *SQEntry {
 	// we will wait if submition queue is full.
 	// it won't be long cause if it is full submition loop receives
 	// event to submit pending immediatly.
@@ -238,7 +235,7 @@ func (q *queue) completed(n uint32) {
 	}
 }
 
-func (q *queue) fillResult(sqe *uring.SQEntry) *result {
+func (q *queue) fillResult(sqe *SQEntry) *result {
 	var res *result
 	for {
 		pos := q.nonce % uint32(len(q.results))
@@ -279,7 +276,7 @@ func (q *queue) submit(n uint32) error {
 	return nil
 }
 
-func (q *queue) Ring() *uring.Ring {
+func (q *queue) Ring() *Ring {
 	return q.ring
 }
 
@@ -287,10 +284,10 @@ func (q *queue) Ring() *uring.Ring {
 
 // Complete blocks until an available submission exists, submits and blocks until completed.
 // Goroutine that executes Complete will be parked.
-func (q *queue) Complete(opt SQOperation) (uring.CQEntry, error) {
+func (q *queue) Complete(opt SQOperation) (CQEntry, error) {
 	// acquire lock
 	if err := q.prepare(1); err != nil {
-		return uring.CQEntry{}, err
+		return CQEntry{}, err
 	}
 
 	// get sqe and fill it with data
@@ -300,7 +297,7 @@ func (q *queue) Complete(opt SQOperation) (uring.CQEntry, error) {
 
 	err := q.submit(1)
 	if err != nil {
-		return uring.CQEntry{}, err
+		return CQEntry{}, err
 	}
 	// wait
 	_, open := <-res.ch
@@ -318,7 +315,7 @@ func (q *queue) Complete(opt SQOperation) (uring.CQEntry, error) {
 	res.setFree()
 	q.completed(1)
 	if !open {
-		return uring.CQEntry{}, ErrClosed
+		return CQEntry{}, ErrClosed
 	}
 	return cqe, nil
 }
@@ -326,7 +323,7 @@ func (q *queue) Complete(opt SQOperation) (uring.CQEntry, error) {
 //go:norace
 
 // Batch submits operations atomically and in the order they are provided.
-func (q *queue) Batch(cqes []uring.CQEntry, opts []SQOperation) ([]uring.CQEntry, error) {
+func (q *queue) Batch(cqes []CQEntry, opts []SQOperation) ([]CQEntry, error) {
 	n := uint32(len(opts))
 	// lock is acqured in prepare and released in submit guarantees
 	// that operations are sent in order. e.g. no other goroutine can concurrently
@@ -379,9 +376,9 @@ func (q *queue) Close() error {
 	}
 
 	sqe := q.ring.GetSQEntry()
-	uring.Nop(sqe)
+	Nop(sqe)
 	sqe.SetUserData(closed)
-	sqe.SetFlags(uring.IOSQE_IO_DRAIN)
+	sqe.SetFlags(IOSQE_IO_DRAIN)
 
 	_, err := q.ring.Submit(0)
 	if err != nil {
