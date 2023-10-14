@@ -113,12 +113,12 @@ func (loop *Ringloop) RunMany2() {
 	}
 }
 
-func (loop *Ringloop) RunManyAcceptor() {
-	for i := 0; i < int(loop.RingCount); i++ {
-		go loop.RingNet[i].Run2(uint16(i))
-	}
-	go loop.GetConnects(loop.RingNet[0].Addr)
-}
+//func (loop *Ringloop) RunManyAcceptor() {
+//	for i := 0; i < int(loop.RingCount); i++ {
+//		loop.RingNet[i].EchoLoop()
+//		go loop.RingNet[i].Run(uint16(i))
+//	}
+//}
 
 // Action is an action that occurs after the completion of an event.
 type Action int
