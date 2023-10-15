@@ -1,7 +1,20 @@
-//go:build linux
-// +build linux
+//Copyright 2023-present Yang Jian
+//
+//Licensed under the Apache License, Version 2.0 (the "License");
+//you may not use this file except in compliance with the License.
+//You may obtain a copy of the License at
+//
+//http://www.apache.org/licenses/LICENSE-2.0
+//
+//Unless required by applicable law or agreed to in writing, software
+//distributed under the License is distributed on an "AS IS" BASIS,
+//WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+//See the License for the specific language governing permissions and
+//limitations under the License.
 
-package UringNet
+//go:build linux
+
+package uringnet
 
 import (
 	"crypto/tls"
@@ -39,8 +52,8 @@ type URingNet struct {
 	//nextProtoOnce     sync.Once
 	nextProtoErr error
 	ring         uring.Ring
-	userDataList sync.Map // all the userdata
-	userDataMap  map[string]string
+	userDataList sync.Map             // all the userdata
+	userDataMap  map[uint64]*UserData // all the userdata
 	ReadBuffer   []byte
 	WriteBuffer  []byte
 
@@ -48,19 +61,26 @@ type URingNet struct {
 
 	ringloop *Ringloop
 
-	resp chan UserData
+	//resp chan UserData
 
 	//mu sync.Mutex
 	//listeners map[*net.Listener]struct{}
 	//activeConn map[*conn]struct{} // 活跃连接
 	//doneChan   chan struct{}
-	onShutdown []func()
+	onShutdown   []func()
+	UserDataPool sync.Pool
 	//BufferPool sync.Pool
 }
 
 type NetAddressType int
 
 type UserdataState uint32
+
+var UserDataPool = sync.Pool{
+	New: func() interface{} {
+		return &UserData{}
+	},
+}
 
 const (
 	accepted      UserdataState = iota // 0. the socket is accepted, that means the network socket is established
@@ -119,8 +139,8 @@ func makeUserData(state UserdataState) *UserData {
 			fmt.Println("发生异常............")
 		}
 	}()
+	userData := UserDataPool.Get().(*UserData)
 
-	userData := new(UserData)
 	//userData := &UserData{
 	//	//ringNet: ringNet,
 	//	state: uint32(state),
@@ -164,18 +184,19 @@ func (ringNet *URingNet) Run2(ringing uint16) {
 		}
 
 		// 3. get the userdata from the map,
-		data, suc := ringNet.userDataList.Load(cqe.UserData())
-		if !suc {
-			//log.Println("Cannot find matched userdata!")
-			//ringnet.ring.Flush()
+		//data, suc := ringNet.userDataList.Load(cqe.UserData())
+		data := ringNet.userDataMap[cqe.UserData()]
+		if data == nil {
 			continue
 		}
 
-		thedata := (data).(*UserData)
+		thedata := data
 
 		switch thedata.state {
 		case uint32(provideBuffer):
-			ringNet.userDataList.Delete(thedata.id)
+			//ringNet.userDataList.Delete(thedata.id)
+			delete(ringNet.userDataMap, thedata.id)
+			UserDataPool.Put(thedata)
 			continue
 		case uint32(accepted):
 			ringNet.Handler.OnOpen(thedata)
@@ -193,7 +214,9 @@ func (ringNet *URingNet) Run2(ringing uint16) {
 			ringNet.read2(Fd, sqe)
 
 			//ringnet.read(Fd, sqe, ringindex)
-			ringNet.userDataList.Delete(thedata.id)
+			//ringNet.userDataList.Delete(thedata.id)
+			delete(ringNet.userDataMap, thedata.id)
+			UserDataPool.Put(thedata)
 			continue
 			//recycle the buffer
 			//ringnet.BufferPool.Put(thedata.buffer)
@@ -214,12 +237,16 @@ func (ringNet *URingNet) Run2(ringing uint16) {
 				continue
 			}
 			ringNet.Handler.OnWritten(*thedata)
-			ringNet.userDataList.Delete(thedata.id)
+			//ringNet.userDataList.Delete(thedata.id)
+			delete(ringNet.userDataMap, thedata.id)
+			UserDataPool.Put(thedata)
 			continue
 		case uint32(closed):
 			ringNet.Handler.OnClose(*thedata)
 			//delete(ringnet.userDataMap, thedata.id)
-			ringNet.userDataList.Delete(thedata.id)
+			//ringNet.userDataList.Delete(thedata.id)
+			delete(ringNet.userDataMap, thedata.id)
+			UserDataPool.Put(thedata)
 		}
 
 	}
@@ -266,15 +293,14 @@ func (ringNet *URingNet) Run(ringing uint16) {
 		//ioc.SetLen(1)
 		switch thedata.state {
 		case uint32(provideBuffer):
-			ringNet.userDataList.Delete(thedata.id)
+			//ringNet.userDataList.Delete(thedata.id)
+			delete(ringNet.userDataMap, thedata.id)
+			UserDataPool.Put(thedata)
 			continue
 		case uint32(accepted):
 			ringNet.Handler.OnOpen(thedata)
 			ringNet.EchoLoop()
 			Fd := cqe.Result()
-			//connect_num++
-			//log.Printf("URing Number: %d Client Conn %d: \n", ringindex, connect_num)
-			//log.Println("URing Number: ", ringindex, " Client Conn %d:", connect_num)
 
 			sqe := ringNet.ring.GetSQEntry()
 			//claim buffer for read
@@ -284,7 +310,9 @@ func (ringNet *URingNet) Run(ringing uint16) {
 			ringNet.read2(Fd, sqe)
 
 			//ringnet.read(Fd, sqe, ringindex)
-			ringNet.userDataList.Delete(thedata.id)
+			//ringNet.userDataList.Delete(thedata.id)
+			delete(ringNet.userDataMap, thedata.id)
+			UserDataPool.Put(thedata)
 			continue
 			//recycle the buffer
 			//ringnet.BufferPool.Put(thedata.buffer)
@@ -307,12 +335,16 @@ func (ringNet *URingNet) Run(ringing uint16) {
 				continue
 			}
 			ringNet.Handler.OnWritten(*thedata)
-			ringNet.userDataList.Delete(thedata.id)
+			//ringNet.userDataList.Delete(thedata.id)
+			delete(ringNet.userDataMap, thedata.id)
+			UserDataPool.Put(thedata)
 			continue
 		case uint32(closed):
 			ringNet.Handler.OnClose(*thedata)
 			//delete(ringnet.userDataMap, thedata.id)
-			ringNet.userDataList.Delete(thedata.id)
+			//ringNet.userDataList.Delete(thedata.id)
+			delete(ringNet.userDataMap, thedata.id)
+			UserDataPool.Put(thedata)
 		}
 	}
 }
@@ -391,7 +423,9 @@ func response(ringnet *URingNet, data *UserData, action Action) {
 	//  recover kernel buffer; the buffer should be restored after using.
 
 	//reclaim the buffer to Pool
-	ringnet.userDataList.Delete(data.id)
+	//ringnet.userDataList.Delete(data.id)
+	delete(ringnet.userDataMap, data.id)
+	UserDataPool.Put(data)
 }
 
 // Run is the core running cycle of io_uring, this function will use auto buffer.
@@ -439,7 +473,9 @@ func responseWithBuffer(ringnet *URingNet, data *UserData, gid uint16, offset ui
 	//  recover kernel buffer; the buffer should be restored after using.
 	ringnet.addBuffer(offset, gid)
 	//  remove the userdata in this loop
-	ringnet.userDataList.Delete(data.id)
+	//ringnet.userDataList.Delete(data.id)
+	delete(ringnet.userDataMap, data.id)
+	UserDataPool.Put(data)
 	//delete(ringnet.userDataMap, data.id)
 }
 
@@ -447,6 +483,7 @@ func (ringNet *URingNet) close(thedata *UserData, sqe *uring.SQEntry) {
 	data := makeUserData(closed)
 	data.Fd = thedata.Fd
 	ringNet.userDataList.Store(data.id, data)
+	ringNet.userDataMap[data.id] = data
 	//ringnet.userDataMap[data.id] = data
 
 	sqe.SetUserData(data.id)
@@ -461,8 +498,8 @@ func (ringNet *URingNet) write(thedata *UserData, sqe2 *uring.SQEntry) {
 	//thebuffer := make([]byte, 1024)
 	//thedata.buffer = thebuffer
 	//copy(thebuffer, thedata.buffer)
-	ringNet.userDataList.Store(data1.id, data1)
-	//ringnet.userDataMap[data1.id] = data1
+	//ringNet.userDataList.Store(data1.id, data1)
+	ringNet.userDataMap[data1.id] = data1
 	//ringnet.mu.Unlock()
 	sqe2.SetUserData(data1.id)
 	//sqe2.SetFlags(uring.IOSQE_IO_LINK)
@@ -477,7 +514,8 @@ func (ringNet *URingNet) write2(Fd int32, buffer []byte) {
 	data1.Fd = Fd
 
 	//ringnet.userDataMap[data1.id] = data1
-	ringNet.userDataList.Store(data1.id, data1)
+	//ringNet.userDataList.Store(data1.id, data1)
+	ringNet.userDataMap[data1.id] = data1
 	//ringnet.mu.Unlock()
 	sqe2.SetUserData(data1.id)
 
@@ -510,13 +548,14 @@ func (ringNet *URingNet) read(Fd int32, sqe *uring.SQEntry, ringIndex uint16) {
 	//co.rawSockAddr = sqe.
 	//ringnet.ringloop.connections.Store(data2.Fd)
 	//ringnet.userDataMap[data2.id] = data2
-	ringNet.userDataList.Store(data2.id, data2)
+	//ringNet.userDataList.Store(data2.id, data2)
+	ringNet.userDataMap[data2.id] = data2
 
 	//paraFlags = uring.IORING_SETUP_SQPOLL
 	ringNet.ring.Submit(0, &paraFlags)
 }
 
-func (ringNet *URingNet) read_multi(Fd int32, sqes []*uring.SQEntry, ringIndex uint16) {
+func (ringNet *URingNet) readMulti(Fd int32, sqes []*uring.SQEntry, ringIndex uint16) {
 	data2 := makeUserData(prepareReader)
 	data2.Fd = Fd
 	for _, sqe := range sqes {
@@ -526,7 +565,8 @@ func (ringNet *URingNet) read_multi(Fd int32, sqes []*uring.SQEntry, ringIndex u
 		sqe.SetFlags(uring.IOSQE_BUFFER_SELECT)
 		sqe.SetBufGroup(ringIndex)
 		uring.ReadNoBuf(sqe, uintptr(Fd), uint32(bufLength))
-		ringNet.userDataList.Store(data2.id, data2)
+		//ringNet.userDataList.Store(data2.id, data2)
+		ringNet.userDataMap[data2.id] = data2
 	}
 	//sqes的长度如何获取:
 	ringNet.ring.Submit(uint32(len(sqes)), &paraFlags)
@@ -540,7 +580,8 @@ func (ringNet *URingNet) read2(Fd int32, sqe *uring.SQEntry) {
 
 	//data2.Buffer = make([]byte, 1024)
 	//ringnet.userDataMap[data2.id] = data2
-	ringNet.userDataList.Store(data.id, data)
+	//ringNet.userDataList.Store(data.id, data)
+	ringNet.userDataMap[data.id] = data
 	//sqe.SetFlags(uring.IOSQE_BUFFER_SELECT)
 	//sqe.SetBufGroup(0)
 	uring.Read(sqe, uintptr(Fd), ringNet.ReadBuffer)
@@ -609,7 +650,8 @@ func NewMany(addr NetAddress, size uint, sqpoll bool, num int, options socket.So
 		uringArray[i].Addr = addr.Address
 		uringArray[i].Type = addr.AddrType
 		uringArray[i].Handler = handler
-		uringArray[i].resp = make(chan UserData, 16)
+		//uringArray[i].resp = make(chan UserData, 16)
+		uringArray[i].userDataMap = make(map[uint64]*UserData)
 
 		if sqpoll {
 			uringArray[i].SetUring(size, &uring.IOUringParams{Flags: uring.IORING_SETUP_SQPOLL, Features: uring.IORING_FEAT_FAST_POLL | uring.IORING_FEAT_NODROP | uring.IORING_FEAT_SINGLE_MMAP}) //Features: uring.IORING_FEAT_FAST_POLL})
@@ -641,7 +683,8 @@ func (ringNet *URingNet) addBuffer(offset uint64, gid uint16) {
 	uring.ProvideSingleBuf(sqe, &ringNet.Autobuffer[offset], 1, uint32(bufLength), gid, offset)
 	data := makeUserData(provideBuffer)
 	sqe.SetUserData(data.id)
-	ringNet.userDataList.Store(data.id, data)
+	//ringNet.userDataList.Store(data.id, data)
+	ringNet.userDataMap[data.id] = data
 	//ringNet.ringloop.ringNet.userDataMap[data.id] = data
 	//_, _ = ringNet.ring.Submit(0, nil)
 }

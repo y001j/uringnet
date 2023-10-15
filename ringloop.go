@@ -1,6 +1,19 @@
+//Copyright 2023-present Yang Jian
+//
+//Licensed under the Apache License, Version 2.0 (the "License");
+//you may not use this file except in compliance with the License.
+//You may obtain a copy of the License at
+//
+//http://www.apache.org/licenses/LICENSE-2.0
+//
+//Unless required by applicable law or agreed to in writing, software
+//distributed under the License is distributed on an "AS IS" BASIS,
+//WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+//See the License for the specific language governing permissions and
+//limitations under the License.
 //go:build linux
 
-package UringNet
+package uringnet
 
 import (
 	"bytes"
@@ -80,7 +93,8 @@ func (ringNet *URingNet) EchoLoop() {
 
 	//sqe.SetAddr()
 	//fmt.Println(sqe.UserData())
-	ringNet.userDataList.Store(data.id, data)
+	//ringNet.userDataList.Store(data.id, data)
+	ringNet.userDataMap[data.id] = data
 	//ringNet.userDataMap[data.id] = data
 	//set client address in data.client
 	uring.Accept(sqe, uintptr(ringNet.SocketFd), nil, nil)
