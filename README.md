@@ -56,7 +56,7 @@ type testServer struct {
 //	@receiver ts
 //	@param data
 //	@return uring_net.Action
-func (ts *testServer) OnTraffic(data *UringNet.UserData, ringnet UringNet.URingNet) UringNet.Action {
+func (ts *testServer) OnTraffic(data *UringNet.UserData, ringnet *UringNet.URingNet) UringNet.Action {
 	data.WriteBuf = data.Buffer
 	return UringNet.Echo
 }
