@@ -28,7 +28,7 @@ type URingNet struct {
 	WriteTimeout      time.Duration
 	IdleTimeout       time.Duration
 	MaxHeaderBytes    int
-	//Fd                atomic.Uintptr
+	Fd                atomic.Uintptr
 	//TLSNextProto      map[string]func(*URingNet, *tls.Conn, Handler)
 	//ConnState         func(net.Conn, ConnState)
 	ErrorLog *log.Logger
@@ -36,21 +36,19 @@ type URingNet struct {
 	disableKeepAlives int32 // accessed atomically.
 	inShutdown        int32
 	Count             uint32
-	//nextProtoOnce     sync.Once
-	nextProtoErr error
-	ring         uring.Ring
-	userDataList sync.Map // all the userdata
-	userDataMap  map[string]string
-	ReadBuffer   []byte
-	WriteBuffer  []byte
+	nextProtoOnce     sync.Once
+	nextProtoErr      error
+	ring              uring.Ring
+	userDataList      sync.Map // all the userdata
+	userDataMap       map[uint64]*UserData
+	ReadBuffer        []byte
+	WriteBuffer       []byte
 
 	Autobuffer [][bufLength]byte // it is just prepared for auto buffer of io_uring
 
 	ringloop *Ringloop
 
-	resp chan UserData
-
-	//mu sync.Mutex
+	mu sync.Mutex
 	//listeners map[*net.Listener]struct{}
 	//activeConn map[*conn]struct{} // 活跃连接
 	//doneChan   chan struct{}
@@ -61,6 +59,12 @@ type URingNet struct {
 type NetAddressType int
 
 type UserdataState uint32
+
+//var UserDataPool = sync.Pool{
+//	New: func() interface{} {
+//		return &UserData{}
+//	},
+//}
 
 const (
 	accepted      UserdataState = iota // 0. the socket is accepted, that means the network socket is established
@@ -73,6 +77,7 @@ const (
 type UserData struct {
 	id uint64
 
+	//resulter chan<- Result
 	opcode uint8
 
 	//ReadBuf  []byte
@@ -88,7 +93,6 @@ type UserData struct {
 	// for accept socket
 	ClientSock *syscall.RawSockaddrAny
 	socklen    *uint32
-	action     Action
 
 	//Bytebuffer bytes.Buffer
 
@@ -107,6 +111,11 @@ type UserData struct {
 // SetState change the state of unique userdata
 func (data *UserData) SetState(state UserdataState) {
 	atomic.StoreUint32(&data.state, uint32(state))
+}
+
+type request struct {
+	ringNet URingNet
+	done    chan struct{}
 }
 
 var increase uint64 = 1
@@ -144,17 +153,23 @@ var paraFlags uint32
 // Run2 is the core running cycle of io_uring, this function don't use auto buffer.
 // TODO: Still don't have the best formula to get buffer size and SQE size.
 func (ringNet *URingNet) Run2(ringing uint16) {
-	//runtime.LockOSThread()
-	//defer runtime.UnlockOSThread()
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	ringNet.Handler.OnBoot(ringNet)
 	//var connect_num uint32 = 0
 	for {
-		// 1. get a CQE in the completion queue,
 		cqe, err := ringNet.ring.GetCQEntry(1)
 
-		// 2. if there is no CQE, then continue to get CQE
+		//defer ringnet.ring.Close()
+		// have accepted
+		//theFd := ringnet.Fd.Load()
+		//if theFd != 0 {
+		//	sqe := ringnet.ring.GetSQEntry()
+		//	ringnet.read(int32(theFd), sqe, ringindex)
+		//	ringnet.Fd.Store(0)
+		//}
+
 		if err != nil {
-			// 2.1 if there is no CQE, except EAGAIN, then continue to get CQE
 			if err == unix.EAGAIN {
 				//log.Println("Completion queue is empty!")
 				continue
@@ -163,8 +178,9 @@ func (ringNet *URingNet) Run2(ringing uint16) {
 			continue
 		}
 
-		// 3. get the userdata from the map,
 		data, suc := ringNet.userDataList.Load(cqe.UserData())
+
+		//data, suc := ringnet.userDataMap[cqe.UserData()]
 		if !suc {
 			//log.Println("Cannot find matched userdata!")
 			//ringnet.ring.Flush()
@@ -173,6 +189,8 @@ func (ringNet *URingNet) Run2(ringing uint16) {
 
 		thedata := (data).(*UserData)
 
+		//ioc := unix.Iovec{}
+		//ioc.SetLen(1)
 		switch thedata.state {
 		case uint32(provideBuffer):
 			ringNet.userDataList.Delete(thedata.id)
@@ -190,7 +208,8 @@ func (ringNet *URingNet) Run2(ringing uint16) {
 			//buffer := make([]byte, 1024) //ringnet.BufferPool.Get().(*[]byte)
 			//temp := ringnet.BufferPool.Get()
 			//bb := temp.(*[]byte)
-			ringNet.read2(Fd, sqe)
+			//ringNet.read2(Fd, sqe)
+			ringNet.recv(Fd, sqe, ringing)
 
 			//ringnet.read(Fd, sqe, ringindex)
 			ringNet.userDataList.Delete(thedata.id)
@@ -205,9 +224,7 @@ func (ringNet *URingNet) Run2(ringing uint16) {
 			}
 			//fmt.Println(BytesToString(thedata.Buffer))
 			//log.Println("the buffer:", BytesToString(thedata.Buffer))
-			action := ringNet.Handler.OnTraffic(thedata, ringNet)
-			response(ringNet, thedata, action)
-
+			response(ringNet, thedata, ringing, 0)
 			continue
 		case uint32(PrepareWriter):
 			if cqe.Result() <= 0 {
@@ -220,8 +237,8 @@ func (ringNet *URingNet) Run2(ringing uint16) {
 			ringNet.Handler.OnClose(*thedata)
 			//delete(ringnet.userDataMap, thedata.id)
 			ringNet.userDataList.Delete(thedata.id)
-		}
 
+		}
 	}
 }
 
@@ -230,6 +247,7 @@ func (ringNet *URingNet) Run(ringing uint16) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	ringNet.Handler.OnBoot(ringNet)
+	//var connect_num uint32 = 0
 	for {
 		cqe, err := ringNet.ring.GetCQEntry(1)
 
@@ -296,8 +314,8 @@ func (ringNet *URingNet) Run(ringing uint16) {
 			}
 			//log.Println("the buffer:", BytesToString(thedata.Buffer))
 			offset := uint64(cqe.Flags() >> uring.IORING_CQE_BUFFER_SHIFT)
-			//thedata.Buffer = ringNet.Autobuffer[offset][:]
-			//thedata.BufSize = cqe.Result()
+			thedata.Buffer = ringNet.Autobuffer[offset][:]
+			thedata.BufSize = cqe.Result()
 			//fmt.Println(BytesToString(thedata.Buffer))
 			//log.Println("the buffer:", BytesToString(thedata.Buffer))
 			responseWithBuffer(ringNet, thedata, ringing, offset)
@@ -323,13 +341,13 @@ func (ringNet *URingNet) ShutDown() {
 	ringNet.inShutdown = 1
 	ringNet.ReadBuffer = nil
 	ringNet.WriteBuffer = nil
-	//ringNet.userDataMap = nil
+	ringNet.userDataMap = nil
 	ringNet.Handler.OnShutdown(ringNet)
 }
 
-func response(ringnet *URingNet, data *UserData, action Action) {
+func response(ringnet *URingNet, data *UserData, gid uint16, offset uint64) {
 
-	//action := ringnet.Handler.OnTraffic(data, *ringnet)
+	action := ringnet.Handler.OnTraffic(data, ringnet)
 
 	switch action {
 	case Echo: // Echo: First write and then add another read event into SQEs.
@@ -338,31 +356,22 @@ func response(ringnet *URingNet, data *UserData, action Action) {
 		sqe1 := ringnet.ring.GetSQEntry()
 
 		//ringnet.write(data, sqe2)
-		ringnet.write(data, sqe1)
+		//ringnet.write(data, sqe1)
+		ringnet.send(data, sqe1, gid)
 
 		sqe := ringnet.ring.GetSQEntry()
 
-		// claim buffer for I/O write
-		//bw := ringnet.BufferPool.Get().(*[]byte)
-		//bw := make([]byte, 1024)
-		//sqe.SetFlags(uring.IOSQE_IO_LINK)
-		//ringnet.addBuffer(offset, gid)
-
-		// we don't do multi-read here, It is not necessary.
-		//var sqes []*uring.SQEntry
-		//sqes = append(sqes, sqe)
-
-		//ringnet.read_multi(data.Fd, sqes, gid)
-
-		ringnet.read2(data.Fd, sqe)
+		ringnet.recv(data.Fd, sqe, gid)
 		//fmt.Println("read is set for uring ", gid)
 
 	case Read:
 		sqe := ringnet.ring.GetSQEntry()
-		ringnet.read2(data.Fd, sqe)
+		//ringnet.read2(data.Fd, sqe)
+		ringnet.recv(data.Fd, sqe, gid)
 	case Write:
 		sqe1 := ringnet.ring.GetSQEntry()
-		ringnet.write(data, sqe1)
+		//ringnet.write(data, sqe1)
+		ringnet.send(data, sqe1, gid)
 		_, err := ringnet.ring.Submit(0, &paraFlags)
 		if err != nil {
 			fmt.Println("Error Message: ", err)
@@ -374,7 +383,8 @@ func response(ringnet *URingNet, data *UserData, action Action) {
 		//bw := ringnet.BufferPool.Get().(*[]byte)
 		//bw := make([]byte, 1024)
 		//sqe2.SetFlags(uring.IOSQE_IO_LINK)
-		ringnet.write(data, sqe2)
+		//ringnet.write(data, sqe2)
+		ringnet.send(data, sqe2, gid)
 		sqe := ringnet.ring.GetSQEntry()
 		sqe.SetFlags(uring.IOSQE_IO_DRAIN)
 		ringnet.close(data, sqe)
@@ -390,8 +400,11 @@ func response(ringnet *URingNet, data *UserData, action Action) {
 	}
 	//  recover kernel buffer; the buffer should be restored after using.
 
-	//reclaim the buffer to Pool
+	//  remove the userdata in this loop
+	//data.Buffer = nil
+	//data.WriteBuf = nil
 	ringnet.userDataList.Delete(data.id)
+	//delete(ringnet.userDataMap, data.id)
 }
 
 // Run is the core running cycle of io_uring, this function will use auto buffer.
@@ -516,6 +529,25 @@ func (ringNet *URingNet) read(Fd int32, sqe *uring.SQEntry, ringIndex uint16) {
 	ringNet.ring.Submit(0, &paraFlags)
 }
 
+func (ringNet *URingNet) recv(Fd int32, sqe *uring.SQEntry, ringIndex uint16) {
+	data2 := makeUserData(prepareReader)
+	data2.Fd = Fd
+	sqe.SetUserData(data2.id)
+	uring.Recv(sqe, uintptr(Fd), ringNet.ReadBuffer, 0)
+	ringNet.userDataList.Store(data2.id, data2)
+	//paraFlags = uring.IORING_ENTER_SQ_WAKEUP
+	//}
+	ringNet.ring.Submit(0, &paraFlags)
+}
+
+func (ringNet *URingNet) send(thedata *UserData, sqe *uring.SQEntry, ringIndex uint16) {
+	data2 := makeUserData(PrepareWriter)
+	data2.Fd = thedata.Fd
+	sqe.SetUserData(data2.id)
+	uring.Send(sqe, uintptr(data2.Fd), thedata.WriteBuf, unix.MSG_DONTWAIT|unix.MSG_ZEROCOPY)
+	ringNet.userDataList.Store(data2.id, data2)
+}
+
 func (ringNet *URingNet) read_multi(Fd int32, sqes []*uring.SQEntry, ringIndex uint16) {
 	data2 := makeUserData(prepareReader)
 	data2.Fd = Fd
@@ -534,15 +566,14 @@ func (ringNet *URingNet) read_multi(Fd int32, sqes []*uring.SQEntry, ringIndex u
 
 // this function is used to read data from the network socket without auto buffer.
 func (ringNet *URingNet) read2(Fd int32, sqe *uring.SQEntry) {
-	data := makeUserData(prepareReader)
-	data.Fd = Fd
-	sqe.SetUserData(data.id)
+	data2 := makeUserData(prepareReader)
+	data2.Fd = Fd
+	sqe.SetUserData(data2.id)
 
 	//data2.Buffer = make([]byte, 1024)
 	//ringnet.userDataMap[data2.id] = data2
-	ringNet.userDataList.Store(data.id, data)
-	//sqe.SetFlags(uring.IOSQE_BUFFER_SELECT)
-	//sqe.SetBufGroup(0)
+	ringNet.userDataList.Store(data2.id, data2)
+
 	uring.Read(sqe, uintptr(Fd), ringNet.ReadBuffer)
 
 	ringNet.ring.Submit(0, &paraFlags)
@@ -553,7 +584,7 @@ func New(addr NetAddress, size uint, sqpoll bool, options socket.SocketOptions) 
 	//1. set the socket
 	//var ringNet *URingNet
 	ringNet := &URingNet{}
-	//ringNet.userDataMap = make(map[uint64]*UserData)
+	ringNet.userDataMap = make(map[uint64]*UserData)
 	ops := socket.SetOptions(string(addr.AddrType), options)
 	switch addr.AddrType {
 	case socket.Tcp, socket.Tcp4, socket.Tcp6:
@@ -580,7 +611,14 @@ func New(addr NetAddress, size uint, sqpoll bool, options socket.SocketOptions) 
 }
 
 // NewMany Create multiple uring instances
-// the size of ringnet array should be equal to the number of CPU cores+-1.
+//
+//	@Description:
+//	@param addr
+//	@param size set SQ size
+//	@param sqpoll if set sqpoll to true, io_uring submit SQs automatically  without enter syscall.
+//	@param num number of io_uring instances need to be created
+//	@return *[]URingNet
+//	@return error
 func NewMany(addr NetAddress, size uint, sqpoll bool, num int, options socket.SocketOptions, handler EventHandler) ([]*URingNet, error) {
 	//1. set the socket
 	var sockfd int
@@ -601,32 +639,21 @@ func NewMany(addr NetAddress, size uint, sqpoll bool, num int, options socket.So
 	for i := 0; i < num; i++ {
 		uringArray[i] = &URingNet{}
 		//uringArray[i].userDataMap = make(map[uint64]*UserData)
-		//下面如何修改？
-		//bufferreg := fixed.New(1024, 1024)
-		uringArray[i].ReadBuffer = make([]byte, bufLength)
-		uringArray[i].WriteBuffer = make([]byte, bufLength)
+		uringArray[i].ReadBuffer = make([]byte, 1024)
+		uringArray[i].WriteBuffer = make([]byte, 1024)
 		uringArray[i].SocketFd = sockfd
 		uringArray[i].Addr = addr.Address
 		uringArray[i].Type = addr.AddrType
 		uringArray[i].Handler = handler
-		uringArray[i].resp = make(chan UserData, 16)
 
 		if sqpoll {
-			uringArray[i].SetUring(size, &uring.IOUringParams{Flags: uring.IORING_SETUP_SQPOLL, Features: uring.IORING_FEAT_FAST_POLL | uring.IORING_FEAT_NODROP | uring.IORING_FEAT_SINGLE_MMAP}) //Features: uring.IORING_FEAT_FAST_POLL})
+			uringArray[i].SetUring(size, &uring.IOUringParams{Flags: uring.IORING_SETUP_SQPOLL, Features: uring.IORING_FEAT_NODROP | uring.IORING_FEAT_FAST_POLL | uring.IORING_FEAT_SQPOLL_NONFIXED}) //Features: uring.IORING_FEAT_FAST_POLL|uring.IORING_FEAT_NODROP})
 		} else {
-			uringArray[i].SetUring(size, &uring.IOUringParams{Features: uring.IORING_FEAT_FAST_POLL | uring.IORING_FEAT_NODROP | uring.IORING_FEAT_SINGLE_MMAP})
+			uringArray[i].SetUring(size, &uring.IOUringParams{Features: uring.IORING_FEAT_FAST_POLL | uring.IORING_FEAT_NODROP})
 		}
 		fmt.Println("Uring instance initiated!")
 	}
 	return uringArray, nil
-}
-
-func (ringNet *URingNet) RegisterBuffers(iovec []unix.Iovec) (err error) {
-	err = ringNet.ring.RegisterBuffers(iovec)
-	if err != nil {
-		return
-	}
-	return
 }
 
 type NetAddress struct {

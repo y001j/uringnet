@@ -3,7 +3,7 @@ package main
 import (
 	"bytes"
 	"github.com/y001j/UringNet"
-	socket "github.com/y001j/UringNet/sockets"
+	"github.com/y001j/UringNet/sockets"
 	"os"
 	"sync"
 	"time"
@@ -29,6 +29,11 @@ func appendResponse(hc *[]byte) {
 	*hc = append(*hc, "\r\nContent-Length: 12\r\n\r\nHello World!"...)
 }
 
+var (
+	errMsg      = "Internal Server Error"
+	errMsgBytes = []byte(errMsg)
+)
+
 func (ts *testServer) OnTraffic(data *UringNet.UserData, ringnet *UringNet.URingNet) UringNet.Action {
 
 	//将data.Buffer转换为string
@@ -40,7 +45,8 @@ func (ts *testServer) OnTraffic(data *UringNet.UserData, ringnet *UringNet.URing
 	//获取tes中“\r\n\r\n”的数量
 	count := bytes.Count(buffer, []byte("GET"))
 	if count == 0 {
-
+		//appendResponse(&data.WriteBuf)
+		//return UringNet.Close
 		return UringNet.None
 	} else {
 		for i := 0; i < count; i++ {
@@ -76,16 +82,17 @@ func (ts *testServer) OnOpen(data *UringNet.UserData) ([]byte, UringNet.Action) 
 
 func main() {
 	addr := os.Args[1]
-	//runtime.GOMAXPROCS(runtime.NumCPU())
+	//runtime.GOMAXPROCS(runtime.NumCPU()*2 - 1)
 
 	options := socket.SocketOptions{TCPNoDelay: socket.TCPNoDelay, ReusePort: true}
-	ringNets, _ := UringNet.NewMany(UringNet.NetAddress{socket.Tcp4, addr}, 3200, true, 5, options, &testServer{}) //runtime.NumCPU()
+	ringNets, _ := UringNet.NewMany(UringNet.NetAddress{socket.Tcp4, addr}, 3200, true, 4, options, &testServer{}) //runtime.NumCPU()
 
 	loop := UringNet.SetLoops(ringNets, 4000)
 
-	loop.RunMany()
-
 	var waitgroup sync.WaitGroup
 	waitgroup.Add(1)
+
+	loop.RunMany()
+
 	waitgroup.Wait()
 }
