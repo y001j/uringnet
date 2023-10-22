@@ -155,7 +155,7 @@ var paraFlags uint32
 func (ringNet *URingNet) Run2(ringing uint16) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
-	ringNet.Handler.OnBoot(*ringNet)
+	ringNet.Handler.OnBoot(ringNet)
 	//var connect_num uint32 = 0
 	for {
 		cqe, err := ringNet.ring.GetCQEntry(1)
@@ -246,7 +246,7 @@ func (ringNet *URingNet) Run2(ringing uint16) {
 func (ringNet *URingNet) Run(ringing uint16) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
-	ringNet.Handler.OnBoot(*ringNet)
+	ringNet.Handler.OnBoot(ringNet)
 	//var connect_num uint32 = 0
 	for {
 		cqe, err := ringNet.ring.GetCQEntry(1)
@@ -342,12 +342,12 @@ func (ringNet *URingNet) ShutDown() {
 	ringNet.ReadBuffer = nil
 	ringNet.WriteBuffer = nil
 	ringNet.userDataMap = nil
-	ringNet.Handler.OnShutdown(*ringNet)
+	ringNet.Handler.OnShutdown(ringNet)
 }
 
 func response(ringnet *URingNet, data *UserData, gid uint16, offset uint64) {
 
-	action := ringnet.Handler.OnTraffic(data, *ringnet)
+	action := ringnet.Handler.OnTraffic(data, ringnet)
 
 	switch action {
 	case Echo: // Echo: First write and then add another read event into SQEs.
@@ -410,7 +410,7 @@ func response(ringnet *URingNet, data *UserData, gid uint16, offset uint64) {
 // Run is the core running cycle of io_uring, this function will use auto buffer.
 func responseWithBuffer(ringnet *URingNet, data *UserData, gid uint16, offset uint64) {
 
-	action := ringnet.Handler.OnTraffic(data, *ringnet)
+	action := ringnet.Handler.OnTraffic(data, ringnet)
 
 	switch action {
 	case Echo: // Echo: First write and then add another read event into SQEs.

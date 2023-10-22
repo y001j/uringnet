@@ -34,7 +34,7 @@ var (
 	errMsgBytes = []byte(errMsg)
 )
 
-func (ts *testServer) OnTraffic(data *UringNet.UserData, ringnet UringNet.URingNet) UringNet.Action {
+func (ts *testServer) OnTraffic(data *UringNet.UserData, ringnet *UringNet.URingNet) UringNet.Action {
 
 	//将data.Buffer转换为string
 	//buffer := data.Buffer[:data.BufSize]
