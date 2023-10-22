@@ -26,7 +26,7 @@ UringNet extensively references existing network frameworks such as gnet and Net
 ### Install UringNet:
 
 ```shell
-go get -u github.com/y001j/UringNet
+go get -u github.com/y001j/uringnet
 ```
 
 ### echo server example
@@ -36,7 +36,7 @@ package main
 
 import (
 	"github.com/y001j/UringNet"
-	socket "github.com/y001j/UringNet/sockets"
+	socket "github.com/y001j/uringnet/sockets"
 	"os"
 	"sync"
 )

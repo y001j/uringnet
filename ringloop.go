@@ -1,6 +1,6 @@
 //go:build linux
 
-package UringNet
+package uringnet
 
 import (
 	"bytes"

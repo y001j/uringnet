@@ -1,4 +1,4 @@
-package UringNet
+package uringnet
 
 import (
 	"bytes"
