@@ -121,6 +121,7 @@ const (
 	IORING_FEAT_CUR_PERSONALITY
 	IORING_FEAT_FAST_POLL
 	IORING_FEAT_POLL_32BITS
+	IORING_FEAT_SQPOLL_NONFIXED
 )
 
 const (
@@ -224,6 +225,10 @@ func (e *SQEntry) SetOpcode(opcode uint8) {
 // SetFlags ...
 func (e *SQEntry) SetFlags(flags uint8) {
 	e.flags = flags
+}
+
+func (e *SQEntry) GetFlags() uint8 {
+	return e.flags
 }
 
 // SetIOPrio ...

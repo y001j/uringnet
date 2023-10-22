@@ -60,6 +60,12 @@ type NetAddressType int
 
 type UserdataState uint32
 
+//var UserDataPool = sync.Pool{
+//	New: func() interface{} {
+//		return &UserData{}
+//	},
+//}
+
 const (
 	accepted      UserdataState = iota // 0. the socket is accepted, that means the network socket is established
 	prepareReader                      // 1. network read is completed
@@ -202,7 +208,8 @@ func (ringNet *URingNet) Run2(ringing uint16) {
 			//buffer := make([]byte, 1024) //ringnet.BufferPool.Get().(*[]byte)
 			//temp := ringnet.BufferPool.Get()
 			//bb := temp.(*[]byte)
-			ringNet.read2(Fd, sqe)
+			//ringNet.read2(Fd, sqe)
+			ringNet.recv(Fd, sqe, ringing)
 
 			//ringnet.read(Fd, sqe, ringindex)
 			ringNet.userDataList.Delete(thedata.id)
@@ -230,6 +237,7 @@ func (ringNet *URingNet) Run2(ringing uint16) {
 			ringNet.Handler.OnClose(*thedata)
 			//delete(ringnet.userDataMap, thedata.id)
 			ringNet.userDataList.Delete(thedata.id)
+
 		}
 	}
 }
@@ -348,31 +356,22 @@ func response(ringnet *URingNet, data *UserData, gid uint16, offset uint64) {
 		sqe1 := ringnet.ring.GetSQEntry()
 
 		//ringnet.write(data, sqe2)
-		ringnet.write(data, sqe1)
+		//ringnet.write(data, sqe1)
+		ringnet.send(data, sqe1, gid)
 
 		sqe := ringnet.ring.GetSQEntry()
 
-		// claim buffer for I/O write
-		//bw := ringnet.BufferPool.Get().(*[]byte)
-		//bw := make([]byte, 1024)
-		//sqe.SetFlags(uring.IOSQE_IO_LINK)
-		//ringnet.addBuffer(offset, gid)
-
-		// we don't do multi-read here, It is not necessary.
-		//var sqes []*uring.SQEntry
-		//sqes = append(sqes, sqe)
-
-		//ringnet.read_multi(data.Fd, sqes, gid)
-
-		ringnet.read2(data.Fd, sqe)
+		ringnet.recv(data.Fd, sqe, gid)
 		//fmt.Println("read is set for uring ", gid)
 
 	case Read:
 		sqe := ringnet.ring.GetSQEntry()
-		ringnet.read2(data.Fd, sqe)
+		//ringnet.read2(data.Fd, sqe)
+		ringnet.recv(data.Fd, sqe, gid)
 	case Write:
 		sqe1 := ringnet.ring.GetSQEntry()
-		ringnet.write(data, sqe1)
+		//ringnet.write(data, sqe1)
+		ringnet.send(data, sqe1, gid)
 		_, err := ringnet.ring.Submit(0, &paraFlags)
 		if err != nil {
 			fmt.Println("Error Message: ", err)
@@ -384,7 +383,8 @@ func response(ringnet *URingNet, data *UserData, gid uint16, offset uint64) {
 		//bw := ringnet.BufferPool.Get().(*[]byte)
 		//bw := make([]byte, 1024)
 		//sqe2.SetFlags(uring.IOSQE_IO_LINK)
-		ringnet.write(data, sqe2)
+		//ringnet.write(data, sqe2)
+		ringnet.send(data, sqe2, gid)
 		sqe := ringnet.ring.GetSQEntry()
 		sqe.SetFlags(uring.IOSQE_IO_DRAIN)
 		ringnet.close(data, sqe)
@@ -529,6 +529,25 @@ func (ringNet *URingNet) read(Fd int32, sqe *uring.SQEntry, ringIndex uint16) {
 	ringNet.ring.Submit(0, &paraFlags)
 }
 
+func (ringNet *URingNet) recv(Fd int32, sqe *uring.SQEntry, ringIndex uint16) {
+	data2 := makeUserData(prepareReader)
+	data2.Fd = Fd
+	sqe.SetUserData(data2.id)
+	uring.Recv(sqe, uintptr(Fd), ringNet.ReadBuffer, 0)
+	ringNet.userDataList.Store(data2.id, data2)
+	//paraFlags = uring.IORING_ENTER_SQ_WAKEUP
+	//}
+	ringNet.ring.Submit(0, &paraFlags)
+}
+
+func (ringNet *URingNet) send(thedata *UserData, sqe *uring.SQEntry, ringIndex uint16) {
+	data2 := makeUserData(PrepareWriter)
+	data2.Fd = thedata.Fd
+	sqe.SetUserData(data2.id)
+	uring.Send(sqe, uintptr(data2.Fd), thedata.WriteBuf, unix.MSG_DONTWAIT|unix.MSG_ZEROCOPY)
+	ringNet.userDataList.Store(data2.id, data2)
+}
+
 func (ringNet *URingNet) read_multi(Fd int32, sqes []*uring.SQEntry, ringIndex uint16) {
 	data2 := makeUserData(prepareReader)
 	data2.Fd = Fd
@@ -554,8 +573,7 @@ func (ringNet *URingNet) read2(Fd int32, sqe *uring.SQEntry) {
 	//data2.Buffer = make([]byte, 1024)
 	//ringnet.userDataMap[data2.id] = data2
 	ringNet.userDataList.Store(data2.id, data2)
-	//sqe.SetFlags(uring.IOSQE_BUFFER_SELECT)
-	//sqe.SetBufGroup(0)
+
 	uring.Read(sqe, uintptr(Fd), ringNet.ReadBuffer)
 
 	ringNet.ring.Submit(0, &paraFlags)
@@ -629,7 +647,7 @@ func NewMany(addr NetAddress, size uint, sqpoll bool, num int, options socket.So
 		uringArray[i].Handler = handler
 
 		if sqpoll {
-			uringArray[i].SetUring(size, &uring.IOUringParams{Flags: uring.IORING_SETUP_SQPOLL, Features: uring.IORING_FEAT_FAST_POLL | uring.IORING_FEAT_NODROP}) //Features: uring.IORING_FEAT_FAST_POLL})
+			uringArray[i].SetUring(size, &uring.IOUringParams{Flags: uring.IORING_SETUP_SQPOLL, Features: uring.IORING_FEAT_NODROP | uring.IORING_FEAT_FAST_POLL | uring.IORING_FEAT_SQPOLL_NONFIXED}) //Features: uring.IORING_FEAT_FAST_POLL|uring.IORING_FEAT_NODROP})
 		} else {
 			uringArray[i].SetUring(size, &uring.IOUringParams{Features: uring.IORING_FEAT_FAST_POLL | uring.IORING_FEAT_NODROP})
 		}

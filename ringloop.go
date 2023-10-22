@@ -49,6 +49,13 @@ func SetLoops(urings []*URingNet, bufferSize int) *Ringloop {
 		theloop.RingNet[i] = urings[i]
 		theloop.socketFd = urings[i].SocketFd
 
+		fdstack := make([]int32, 0, 1024)
+		fdstack = append(fdstack, int32(theloop.socketFd))
+		err := theloop.RingNet[i].ring.RegisterFiles(fdstack)
+		if err != nil {
+			return nil
+		}
+
 		//set buffer
 		sqe2 := theloop.RingNet[i].ring.GetSQEntry()
 		//Buffers := make([][]byte, 1024, 1024)
@@ -80,13 +87,16 @@ func (ringNet *URingNet) EchoLoop() {
 	data.ClientSock = &syscall.RawSockaddrAny{}
 	data.socklen = &len
 	sqe.SetUserData(data.id)
+	sqe.SetFlags(uring.IOSQE_FIXED_FILE)
 
 	//sqe.SetAddr()
 	//fmt.Println(sqe.UserData())
 	ringNet.userDataList.Store(data.id, data)
 	//ringNet.userDataMap[data.id] = data
 	//set client address in data.client
-	uring.Accept(sqe, uintptr(ringNet.SocketFd), nil, nil)
+	//uring.Accept(sqe, uintptr(ringNet.SocketFd), nil, nil)
+	uring.Accept(sqe, uintptr(0), nil, nil)
+
 	_, err := ringNet.ring.Submit(0, &paraFlags)
 
 	//fmt.Println("echo server running...")
