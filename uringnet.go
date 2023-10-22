@@ -6,8 +6,8 @@ package uringnet
 import (
 	"crypto/tls"
 	"fmt"
-	socket "github.com/y001j/UringNet/sockets"
-	"github.com/y001j/UringNet/uring"
+	socket "github.com/y001j/uringnet/sockets"
+	"github.com/y001j/uringnet/uring"
 	"golang.org/x/sys/unix"
 	"log"
 	"runtime"

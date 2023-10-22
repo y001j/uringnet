@@ -19,7 +19,7 @@
 package socket
 
 import (
-	"github.com/y001j/UringNet/errors"
+	"github.com/y001j/uringnet/errors"
 	"net"
 	"os"
 

@@ -22,7 +22,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	bsPool "github.com/y001j/UringNet/byteslice"
+	bsPool "github.com/y001j/uringnet/byteslice"
 )
 
 var ipv4InIPv6Prefix = []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff}

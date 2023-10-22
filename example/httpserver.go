@@ -2,8 +2,8 @@ package main
 
 import (
 	"bytes"
-	uringnet "github.com/y001j/UringNet"
-	"github.com/y001j/UringNet/sockets"
+	uringnet "github.com/y001j/uringnet"
+	socket "github.com/y001j/uringnet/sockets"
 	"os"
 	"sync"
 	"time"
@@ -72,7 +72,7 @@ func main() {
 	//runtime.GOMAXPROCS(runtime.NumCPU()*2 - 1)
 
 	options := socket.SocketOptions{TCPNoDelay: socket.TCPNoDelay, ReusePort: true}
-	ringNets, _ := uringnet.NewMany(uringnet.NetAddress{socket.Tcp4, addr}, 3200, true, 1, options, &testServer{}) //runtime.NumCPU()
+	ringNets, _ := uringnet.NewMany(uringnet.NetAddress{socket.Tcp4, addr}, 3200, true, 3, options, &testServer{}) //runtime.NumCPU()
 
 	loop := uringnet.SetLoops(ringNets, 4000)
 

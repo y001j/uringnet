@@ -5,7 +5,7 @@ package uringnet
 import (
 	"bytes"
 	"fmt"
-	"github.com/y001j/UringNet/uring"
+	"github.com/y001j/uringnet/uring"
 
 	"golang.org/x/sys/unix"
 	"io"

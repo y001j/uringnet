@@ -2,7 +2,7 @@ package uringnet
 
 import (
 	"fmt"
-	"github.com/y001j/UringNet/uring"
+	"github.com/y001j/uringnet/uring"
 )
 
 // create a factory() to be used with channel based pool
