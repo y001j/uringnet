@@ -1,4 +1,4 @@
-module github.com/y001j/UringNet
+module github.com/y001j/uringnet
 
 go 1.19
 
