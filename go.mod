@@ -10,5 +10,3 @@ require (
 	github.com/stretchr/testify v1.8.4
 	golang.org/x/sys v0.12.0
 )
-
-require github.com/y001j/UringNet v0.0.2-alpha // indirect
