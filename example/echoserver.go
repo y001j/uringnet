@@ -1,8 +1,8 @@
 package main
 
 import (
-	"github.com/y001j/UringNet"
-	socket "github.com/y001j/UringNet/sockets"
+	"github.com/y001j/uringnet"
+	socket "github.com/y001j/uringnet/sockets"
 	"os"
 	"runtime"
 	"sync"
@@ -11,7 +11,7 @@ import (
 type testServer struct {
 	UringNet.BuiltinEventEngine
 
-	testloop *UringNet.Ringloop
+	testloop *uringnet.Ringloop
 	//ring      *uring_net.URingNet
 	addr      string
 	multicore bool
@@ -23,22 +23,22 @@ type testServer struct {
 //	@receiver ts
 //	@param data
 //	@return uring_net.Action
-func (ts *testServer) OnTraffic(data *UringNet.UserData, ringnet UringNet.URingNet) UringNet.Action {
+func (ts *testServer) OnTraffic(data *uringnet.UserData, ringnet *uringnet.URingNet) uringnet.Action {
 	data.WriteBuf = data.Buffer
-	return UringNet.Echo
+	return uringnet.Echo
 }
 
-func (ts *testServer) OnWritten(data UringNet.UserData) UringNet.Action {
+func (ts *testServer) OnWritten(data uringnet.UserData) UringNet.Action {
 	//buf, _ := c.Next(-1)
 	//thebuffer := ts.testloop.GetBuffer()
 	//fmt.Println("Send Message to Client: \n", string(data))
 	//fmt.Println("Send Message to Client: \n", uring_net.BytesToString(thebuffer[data.R1.(uint64)][:]))
 	//c.Write(buf)
 
-	return UringNet.None
+	return uringnet.None
 }
 
-func (ts *testServer) OnOpen(data *UringNet.UserData) ([]byte, UringNet.Action) {
+func (ts *testServer) OnOpen(data *uringnet.UserData) ([]byte, uringnet.Action) {
 	//buf, _ := c.Next(-1)
 	//thebuffer := ts.testloop.GetBuffer()
 	//fmt.Println("Send Message to Client: \n", string(data))
@@ -46,7 +46,7 @@ func (ts *testServer) OnOpen(data *UringNet.UserData) ([]byte, UringNet.Action) 
 	//c.Write(buf)
 	//c.SetContext(&httpCodec{parser: wildcat.NewHTTPParser()})
 	//return nil, gnet.None
-	return nil, UringNet.None
+	return nil, uringnet.None
 }
 
 func main() {
@@ -55,9 +55,9 @@ func main() {
 	//accptRingNet, _ := uring_net.New(uring_net.NetAddress{uring_net., addr}, 500, true)
 	//TcpAddr
 	options := socket.SocketOptions{TCPNoDelay: socket.TCPNoDelay, ReusePort: true}
-	ringNets, _ := UringNet.NewMany(UringNet.NetAddress{socket.Tcp4, addr}, 3200, true, runtime.NumCPU()*2-2, options, &testServer{}) //runtime.NumCPU()
+	ringNets, _ := uringnet.NewMany(uringnet.NetAddress{socket.Tcp4, addr}, 3200, true, runtime.NumCPU()*2-2, options, &testServer{}) //runtime.NumCPU()
 
-	loop := UringNet.SetLoops(ringNets, 3000)
+	loop := uringnet.SetLoops(ringNets, 3000)
 	var waitgroup sync.WaitGroup
 	waitgroup.Add(1)
 
