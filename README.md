@@ -35,7 +35,7 @@ go get -u github.com/y001j/uringnet
 package main
 
 import (
-	"github.com/y001j/UringNet"
+	"github.com/y001j/uringnet"
 	socket "github.com/y001j/uringnet/sockets"
 	"os"
 	"sync"
