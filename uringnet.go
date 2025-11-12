@@ -6,6 +6,7 @@ package uringnet
 import (
 	"crypto/tls"
 	"fmt"
+	"github.com/y001j/uringnet/errors"
 	socket "github.com/y001j/uringnet/sockets"
 	"github.com/y001j/uringnet/uring"
 	"golang.org/x/sys/unix"
@@ -118,25 +119,12 @@ type request struct {
 	done    chan struct{}
 }
 
-var increase uint64 = 1
+var increase atomic.Uint64
 
 func makeUserData(state UserdataState) *UserData {
-	defer func() {
-		err := recover() // 内置函数，可以捕获异常
-		if err != nil {
-			fmt.Println("err:", err)
-			fmt.Println("发生异常............")
-		}
-	}()
-
 	userData := new(UserData)
-	//userData := &UserData{
-	//	//ringNet: ringNet,
-	//	state: uint32(state),
-	//}
 	userData.state = uint32(state)
-	userData.id = increase
-	increase++
+	userData.id = increase.Add(1)
 
 	return userData
 }
@@ -581,32 +569,44 @@ func (ringNet *URingNet) read2(Fd int32, sqe *uring.SQEntry) {
 
 // New Creates a new uRingnNet which is used to
 func New(addr NetAddress, size uint, sqpoll bool, options socket.SocketOptions) (*URingNet, error) {
-	//1. set the socket
-	//var ringNet *URingNet
 	ringNet := &URingNet{}
 	ringNet.userDataMap = make(map[uint64]*UserData)
 	ops := socket.SetOptions(string(addr.AddrType), options)
+
+	var err error
 	switch addr.AddrType {
 	case socket.Tcp, socket.Tcp4, socket.Tcp6:
-		ringNet.SocketFd, _, _ = socket.TCPSocket(string(addr.AddrType), addr.Address, true, ops...) //ListenTCPSocket(addr)
+		ringNet.SocketFd, _, err = socket.TCPSocket(string(addr.AddrType), addr.Address, true, ops...)
 	case socket.Udp, socket.Udp4, socket.Udp6:
-		ringNet.SocketFd, _, _ = socket.UDPSocket(string(addr.AddrType), addr.Address, true, ops...)
+		ringNet.SocketFd, _, err = socket.UDPSocket(string(addr.AddrType), addr.Address, true, ops...)
 	case socket.Unix:
-		ringNet.SocketFd, _, _ = socket.UnixSocket(string(addr.AddrType), addr.Address, true, ops...)
-
+		ringNet.SocketFd, _, err = socket.UnixSocket(string(addr.AddrType), addr.Address, true, ops...)
 	default:
-		ringNet.SocketFd = -1
+		return nil, errors.ErrUnsupportedProtocol
 	}
+
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", errors.ErrSocketCreation, err)
+	}
+
+	if ringNet.SocketFd < 0 {
+		return nil, errors.ErrInvalidSocketFd
+	}
+
 	ringNet.Addr = addr.Address
 	ringNet.Type = addr.AddrType
 
-	//ringNet.userDataList = make(sync.Map, 1024)
-	//Create the io_uring instance
+	// Create the io_uring instance
+	var params *uring.IOUringParams
 	if sqpoll {
-		ringNet.SetUring(size, &uring.IOUringParams{Flags: uring.IORING_SETUP_SQPOLL | uring.IORING_SETUP_SQ_AFF, SQThreadCPU: 1})
-	} else {
-		ringNet.SetUring(size, nil)
+		params = &uring.IOUringParams{Flags: uring.IORING_SETUP_SQPOLL | uring.IORING_SETUP_SQ_AFF, SQThreadCPU: 1}
 	}
+
+	_, err = ringNet.SetUring(size, params)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", errors.ErrRingSetup, err)
+	}
+
 	return ringNet, nil
 }
 
@@ -620,25 +620,34 @@ func New(addr NetAddress, size uint, sqpoll bool, options socket.SocketOptions) 
 //	@return *[]URingNet
 //	@return error
 func NewMany(addr NetAddress, size uint, sqpoll bool, num int, options socket.SocketOptions, handler EventHandler) ([]*URingNet, error) {
-	//1. set the socket
 	var sockfd int
 	ops := socket.SetOptions(string(addr.AddrType), options)
+
+	var err error
 	switch addr.AddrType {
 	case socket.Tcp, socket.Tcp4, socket.Tcp6:
-		sockfd, _, _ = socket.TCPSocket(string(addr.AddrType), addr.Address, true, ops...) //ListenTCPSocket(addr)
+		sockfd, _, err = socket.TCPSocket(string(addr.AddrType), addr.Address, true, ops...)
 	case socket.Udp, socket.Udp4, socket.Udp6:
-		sockfd, _, _ = socket.UDPSocket(string(addr.AddrType), addr.Address, true, ops...)
+		sockfd, _, err = socket.UDPSocket(string(addr.AddrType), addr.Address, true, ops...)
 	case socket.Unix:
-		sockfd, _, _ = socket.UnixSocket(string(addr.AddrType), addr.Address, true, ops...)
+		sockfd, _, err = socket.UnixSocket(string(addr.AddrType), addr.Address, true, ops...)
 	default:
-		sockfd = -1
+		return nil, errors.ErrUnsupportedProtocol
 	}
-	uringArray := make([]*URingNet, num) //*URingNet{}
-	//ringNet.userDataList = make(sync.Map, 1024)
-	//Create the io_uring instance
+
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", errors.ErrSocketCreation, err)
+	}
+
+	if sockfd < 0 {
+		return nil, errors.ErrInvalidSocketFd
+	}
+
+	uringArray := make([]*URingNet, num)
+
+	// Create the io_uring instances
 	for i := 0; i < num; i++ {
 		uringArray[i] = &URingNet{}
-		//uringArray[i].userDataMap = make(map[uint64]*UserData)
 		uringArray[i].ReadBuffer = make([]byte, 1024)
 		uringArray[i].WriteBuffer = make([]byte, 1024)
 		uringArray[i].SocketFd = sockfd
@@ -646,12 +655,24 @@ func NewMany(addr NetAddress, size uint, sqpoll bool, num int, options socket.So
 		uringArray[i].Type = addr.AddrType
 		uringArray[i].Handler = handler
 
+		var params *uring.IOUringParams
 		if sqpoll {
-			uringArray[i].SetUring(size, &uring.IOUringParams{Flags: uring.IORING_SETUP_SQPOLL, Features: uring.IORING_FEAT_NODROP | uring.IORING_FEAT_FAST_POLL | uring.IORING_FEAT_SQPOLL_NONFIXED}) //Features: uring.IORING_FEAT_FAST_POLL|uring.IORING_FEAT_NODROP})
+			params = &uring.IOUringParams{
+				Flags:    uring.IORING_SETUP_SQPOLL,
+				Features: uring.IORING_FEAT_NODROP | uring.IORING_FEAT_FAST_POLL | uring.IORING_FEAT_SQPOLL_NONFIXED,
+			}
 		} else {
-			uringArray[i].SetUring(size, &uring.IOUringParams{Features: uring.IORING_FEAT_FAST_POLL | uring.IORING_FEAT_NODROP})
+			params = &uring.IOUringParams{
+				Features: uring.IORING_FEAT_FAST_POLL | uring.IORING_FEAT_NODROP,
+			}
 		}
-		fmt.Println("Uring instance initiated!")
+
+		_, err = uringArray[i].SetUring(size, params)
+		if err != nil {
+			return nil, fmt.Errorf("%w: failed to setup uring instance %d: %v", errors.ErrRingSetup, i, err)
+		}
+
+		fmt.Printf("Uring instance %d initiated!\n", i)
 	}
 	return uringArray, nil
 }

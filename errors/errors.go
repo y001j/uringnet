@@ -39,4 +39,12 @@ var (
 	ErrUnsupportedOp = errors.New("unsupported operation")
 	// ErrNegativeSize occurs when trying to pass a negative size to a buffer.
 	ErrNegativeSize = errors.New("negative size is invalid")
+	// ErrSocketCreation occurs when socket creation fails.
+	ErrSocketCreation = errors.New("failed to create socket")
+	// ErrInvalidSocketFd occurs when socket file descriptor is invalid.
+	ErrInvalidSocketFd = errors.New("invalid socket file descriptor")
+	// ErrRingSetup occurs when io_uring setup fails.
+	ErrRingSetup = errors.New("failed to setup io_uring")
+	// ErrFileRegister occurs when registering files to io_uring fails.
+	ErrFileRegister = errors.New("failed to register files to io_uring")
 )

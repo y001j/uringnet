@@ -36,15 +36,20 @@ const bufLength uint64 = 2048
 //
 //	@Description: set the ringloop for the engine
 //	@param urings
+//	@param bufferSize
 //	@return *Ringloop
-func SetLoops(urings []*URingNet, bufferSize int) *Ringloop {
+//	@return error
+func SetLoops(urings []*URingNet, bufferSize int) (*Ringloop, error) {
 	size := len(urings)
+	if size == 0 {
+		return nil, fmt.Errorf("no uring instances provided")
+	}
+
 	theloop := &Ringloop{}
 	theloop.RingCount = int32(size)
-	//theloop.connections = map[int]*conn{}
 	theloop.RingNet = urings
-	for i := 0; i < size; i++ {
 
+	for i := 0; i < size; i++ {
 		urings[i].ringloop = theloop
 		theloop.RingNet[i] = urings[i]
 		theloop.socketFd = urings[i].SocketFd
@@ -53,20 +58,24 @@ func SetLoops(urings []*URingNet, bufferSize int) *Ringloop {
 		fdstack = append(fdstack, int32(theloop.socketFd))
 		err := theloop.RingNet[i].ring.RegisterFiles(fdstack)
 		if err != nil {
-			return nil
+			return nil, fmt.Errorf("failed to register files for ring %d: %w", i, err)
 		}
 
-		//set buffer
+		// Set buffer
 		sqe2 := theloop.RingNet[i].ring.GetSQEntry()
 		urings[i].Autobuffer = make([][bufLength]byte, bufferSize)
 		uring.ProvideBuf(sqe2, urings[i].Autobuffer, uint32(bufferSize), uint32(bufLength), uint16(i))
 		data := makeUserData(provideBuffer)
 		sqe2.SetUserData(data.id)
 		theloop.RingNet[i].userDataList.Store(data.id, data)
-		fmt.Println("Add Kernel buffer... for ring ", i)
-		_, _ = theloop.RingNet[i].ring.Submit(1, &paraFlags)
+		fmt.Printf("Add Kernel buffer... for ring %d\n", i)
+
+		_, err = theloop.RingNet[i].ring.Submit(1, &paraFlags)
+		if err != nil {
+			return nil, fmt.Errorf("failed to submit buffer for ring %d: %w", i, err)
+		}
 	}
-	return theloop
+	return theloop, nil
 }
 
 func (loop *Ringloop) GetBuffer() [][bufLength]byte {
