@@ -147,11 +147,6 @@ With `ZeroCopyThreshold > 0` the receive buffer ring is also registered as an io
   is always copied by the kernel**, so it is slower there; pinned pages count against `RLIMIT_MEMLOCK`. If registration
   fails, uringnet falls back to plain `SEND_ZC`. If `SEND_ZC` fails with `ENOMEM`/`EOPNOTSUPP`, it falls back to normal sends.
 
-### Benchmarks
-
-`bench/` has an echo benchmark comparing Go `net`, hand-written epoll, gnet, raw iouring-go and uringnet, runnable in Docker:
-see [bench/README.md](bench/README.md).
-
 ### Testing on macOS
 
 ```shell
@@ -162,72 +157,90 @@ docker run --rm --security-opt seccomp=unconfined -v "$PWD":/src -w /src golang:
 
 ## Benchmark
 
-### Echo Stress Testing
+Echo benchmark from [`bench/`](bench/README.md): one client keeps `c` connections open and on each one sends `p` requests of
+`s` bytes, then reads all responses back. Servers compared:
 
-In echo stress testing, the benchmark compared [go net](https://golang.org/pkg/net/), [gnet](https://github.com/panjf2000/gnet) and UringNet
+- **epoll**: hand-written epoll event loop (one locked thread per core, `SO_REUSEPORT`, non-blocking read/write)
+- **gnet**: [gnet](https://github.com/panjf2000/gnet) v2, an epoll framework
+- **uringnet**: this project with default settings (256 receive buffers of 16KB; recv bundles on, since the kernel is 6.16+)
+- **uringnet + SpinTime**: the same with `SpinTime = 50µs`
 
-Echo test tool: [rust echo bench](https://github.com/haraldh/rust_echo_bench)
+> **Environment:** Lima VM (Apple Virtualization.framework) on an Apple Silicon Mac, Ubuntu 25.10, **Linux 6.17**, 4 vCPUs.
+> The server is pinned to **1 core** (CPU 0, `GOMAXPROCS=1`, one event loop) and the client to the other 3 cores, over loopback.
+> Each number is the median of 3 runs of 3 seconds. Numbers in parentheses are relative to epoll.
 
-> **Test environment:**
->
-> Host:
->
-> CPU：Intel Core i5 12400F 6 core 12 thread
->
-> Memory: DDR4 32GB
->
-> OS：Windows 11
->
-> Virtual Machine:
->
-> VMware® Workstation 16 Pro
->
-> Processors: 8P ; Memory 16GB; Intel VT-x
->
-> OS：Ubuntu 22.04.1 LTS， Kernel：5.19.3
+### Request/response (`p = 1`)
 
-#### Test Result
+| Connections, size | epoll | gnet | uringnet | uringnet + SpinTime |
+|---|---|---|---|---|
+| 1, 128B | 8k | 1.05 | 1.11 | **1.52** |
+| 1, 16KB | 7k | **1.21** | 1.06 | 1.13 |
+| 16, 128B | 106k | 1.11 | 0.87 | **1.37** |
+| 16, 16KB | 77k | 1.03 | 0.81 | **1.27** |
+| 64, 128B | 200k | 1.17 | 1.00 | **1.21** |
+| 64, 16KB | 145k | **1.10** | 0.97 | 1.06 |
+| 512, 128B | 361k | 0.97 | 1.01 | **1.06** |
+| 512, 16KB | 187k | 1.00 | 1.09 | **1.11** |
 
-![echo](https://pic.maienzx.com/qiniuPic/202211061218743.png)
+Median latency (p50) and server CPU:
 
-### HTTP Stress Testing
+| Connections, size | epoll | gnet | uringnet | uringnet + SpinTime |
+|---|---|---|---|---|
+| 1, 128B | 79µs / 25% | 75µs / 22% | 80µs / 27% | **34µs** / 61% |
+| 16, 128B | 108µs / 63% | 87µs / 62% | 120µs / 55% | **56µs** / 76% |
+| 16, 16KB | 155µs / 69% | 135µs / 65% | 204µs / 66% | **96µs** / 83% |
+| 64, 128B | 213µs / 82% | 191µs / 86% | 225µs / 78% | **169µs** / 86% |
+| 512, 128B | 1229µs / 97% | 1263µs / 98% | 1152µs / 94% | **1087µs** / 94% |
 
-In HTTP stress testing, the benchmark compared [gnet](https://github.com/panjf2000/gnet), fasthttp and UringNet
+### Pipelined (`p = 8` requests in flight per connection)
 
-Echo test tool: [wrk](https://github.com/wg/wrk)
+| Connections, size | epoll | gnet | uringnet, no bundles | uringnet (bundles) |
+|---|---|---|---|---|
+| 64, 128B | 1.68M | **1.11** | 0.98 | 1.01 |
+| 64, 16KB | 196k | **1.70** | 1.41 | 1.50 |
+| 512, 128B | 2.39M | 0.99 | **1.07** | 1.04 |
+| 512, 16KB | 154k | **1.82** | 1.43 | 1.61 |
 
-> Test Enviroment 
->
-> Host：
->
-> CPU：Intel Core i5 12400F 6 core 12 thread
->
-> Memory: DDR4 32GB
->
-> OS：Windows 11
->
-> Testing Virtual Machine：
->
-> VMware® Workstation 16 Pro
->
-> Processors: 8P ; Memory 16GB; Intel VT-x
->
-> OS：Ubuntu 22.04.1 LTS， Kernel：5.19.3
->
-> wrk Virtual Machine：
->
-> VMware® Workstation 16 Pro
->
-> Processors: 4P ; Memory 8GB; Intel VT-x
->
-> OS：Ubuntu 20.04.5 LTS， Kernel：5.15.0   
+### Reading the results
 
-#### Test Result
+- **When the server is busy** (512 connections, server CPU ≥ 94%), uringnet matches or slightly beats epoll and gnet.
+- **At low and medium load**, request/response throughput is bounded by latency, not CPU. Without busy polling, the event loop
+  sleeps and wakes up more often than epoll per request, so it trails epoll by up to ~20%. With `SpinTime = 50µs` it leads both
+  epoll and gnet and halves the median latency. The cost is CPU: about twice the server CPU at the lowest load, and almost nothing
+  extra once the server is busy. A 10µs spin was mostly too short to make a difference in this environment.
+- **Bulk pipelined transfers** are where gnet is strongest. gnet reads up to 64KB per connection into one buffer that stays hot
+  in the CPU cache, and only when the event loop gets to that connection. io_uring provided buffers are filled by the kernel as
+  soon as data arrives, so every connection with pending data holds a buffer. Recv bundles narrow the gap (1.43x → 1.61x of epoll at
+  512 connections). gnet's throughput here comes partly at the expense of fairness: in earlier runs its p99 latency was 450ms+,
+  versus 40–70ms for uringnet.
+- **Zero-copy send** is not shown: traffic to a local socket is always copied by the kernel, so it has to be measured across
+  machines on a real NIC.
 
-![image-20221212113551004](https://pic.maienzx.com/qiniuPic/image-20221212113551004.png)
+### Caveats
+
+These are loopback numbers in a VM. Waking an idle vCPU is expensive in a VM, which favors busy polling more than bare metal
+would. With only 3 client cores, differences at high concurrency may be compressed. Results vary by 5–15% between runs, so treat
+differences under 10% as a tie.
+
+The same benchmark in Docker Desktop (Linux 6.10, recv bundles disabled, 1-core server with an 8-core client, without
+`SpinTime`) was less favorable to uringnet: 0.67–0.78x of epoll at 64 connections, 0.78–0.91x at 512 connections, and
+1.29–1.54x for pipelined 16KB (gnet: 1.56–1.69x).
+
+To reproduce, or better, to measure on your own hardware:
+
+```shell
+bench/docker.sh                               # in Docker, server 4 cores / client 4 cores
+MODE=onecore DEPTHS="1 8" bench/docker.sh     # server 1 core / client 8 cores
+sh bench/scripts/run.sh                       # directly on a Linux machine (needs taskset and 12 CPUs)
+```
 
 ## Known Issues
 
-> **Warning:** The project is still in development, there are still many bugs and performance issues. If you find any bugs or have any suggestions, please feel free to open an issue.
+> **Warning:** The project is still in development. If you find any bugs or have any suggestions, please feel free to open an issue.
 
-During our performance tests with wrk, we observed that UringNet requires a warm-up period during HTTP stress testing. Typically, a warm-up time of around 5 minutes is necessary to ensure that the UringNet test code reaches its peak performance, which surpasses the current fastest framework by more than 10%. I am still investigating the root cause of this behavior.
+- Requires Linux 6.0+ with io_uring enabled. Docker's default seccomp profile and Kubernetes `RuntimeDefault` block io_uring,
+  and Linux 6.6+ can disable it with `kernel.io_uring_disabled`. There is no epoll fallback yet.
+- Only stream sockets (TCP, Unix) are supported; UDP and TLS are not.
+- Recv bundles need Linux 6.16+ for correct data (see *Recv bundles*).
+- The send queue of a connection is unbounded: a peer that never reads lets the server buffer data without limit.
+- If accept keeps failing (for example `EMFILE`), the multishot accept is re-armed immediately and can spin.
