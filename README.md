@@ -11,13 +11,30 @@
 
 ### Why I created this 
 
-UringNet is a high performance network I/O framework. It is light weighted and developed by Golang. The foundation of UringNet is [io_uring](https://kernel.dk/io_uring.pdf) - a new async IO interface - from Linux Kernel since version 5.1 in 2019. This project just comes from experimental projects in my edge computing and IoT research. I am just want to find a way to build a simple but high performance network package transmit tool in IoT gateways. I have tried traditional select/epoll and then tried io_uring, finally , the io_uring get much better performance. In most cases, the performance improvement ranges from **10% to 30%**, while in the most extreme case, the performance improvement can reach up to 66%.
+UringNet is a lightweight network I/O framework written in Go, built on [io_uring](https://kernel.dk/io_uring.pdf), the asynchronous I/O interface Linux added in 5.1 (2019). It comes from experimental projects in my edge computing and IoT research: I wanted a simple but fast way to move network packets in IoT gateways, tried select/epoll first, and then io_uring.
+
+Measured against a hand-written epoll loop and [gnet](https://github.com/panjf2000/gnet) (see [Benchmark](#benchmark), Linux 6.17):
+
+- **Busy server** (CPU-bound): about the same as epoll and gnet, from equal to roughly 10% faster.
+- **Low and medium load, latency-sensitive** (request/response): with `SpinTime` enabled, 1.1–1.5x the throughput of epoll and
+  up to half the median latency, at the cost of extra CPU. Without it, up to ~20% behind epoll.
+- **Bulk pipelined transfers**: 1.4–1.6x of epoll, but behind gnet (1.7–1.8x).
+
+What io_uring brings is far fewer system calls (under load as few as 0.04 per request, versus 2–3 for epoll), batched submission, and
+zero-copy send for large buffers. The gains depend heavily on the workload and the machine, so measure with your own traffic.
 
 ### Should You adopt it in your project
 
-Though UringNet is designed to be used in IoT platforms originally, it does provide basic TCP and UDP network functions. If your project really need to handle extremely huge data traffic, you can give it a try. 
+UringNet was designed for IoT gateways: many connections, small messages, request/response traffic. It provides TCP and Unix
+stream sockets (no UDP or TLS yet). Consider it if:
 
-In most cases, you could just use more mature network frameworks, for example, Go [net](https://golang.org/pkg/net/)/[http](https://pkg.go.dev/net/http), [netty](https://netty.io/), [libuv](https://github.com/libuv/libuv).
+- you run Linux 6.0+ (6.16+ for recv bundles) and io_uring is allowed on the host (it is blocked by Docker's and Kubernetes'
+  default seccomp profiles), and
+- latency or system-call overhead matters to you, and you can spare some CPU for busy polling.
+
+Otherwise, more mature options such as Go [net](https://golang.org/pkg/net/)/[http](https://pkg.go.dev/net/http),
+[gnet](https://github.com/panjf2000/gnet), [netty](https://netty.io/) or [libuv](https://github.com/libuv/libuv) are a safer
+choice. They run on more platforms and kernels, and have been in production for years.
 
 ## Get Started
 
