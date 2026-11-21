@@ -31,10 +31,12 @@ type zcRef struct {
 
 // conn 是一个 TCP 连接的状态机，只在所属 URingNet 的 Loop 线程中访问。
 //
-//   - 读：一个 multishot recv 持续接收，数据落在 provided buffer ring 中。
+//   - 读：一个 multishot recv 持续接收，数据落在 provided buffer ring 中；内核支持时使用
+//     recv bundle，一个完成事件可携带多个缓冲区，逐个交给 OnTraffic。
 //   - 写：发送队列按段组织，同一时刻最多一个 send 在途，保证字节流顺序；处理短写。
-//     拷贝的小数据合并到同一段中（自然合并多个小响应，适合 pipelining）。
-//   - 原地发送：WriteBuf 指向本次接收缓冲区（如 echo）且队列为空时，直接发送该缓冲区，发送完再归还。
+//     一次回调（bundle 时为一个完成事件中的全部缓冲区）产生的数据在回调结束后一并发送，
+//     队列中的多段用一次 sendmsg 聚集发送（最多 maxIov 段）；拷贝的小数据合并到同一段中。
+//   - 原地发送：WriteBuf 指向本次接收缓冲区（如 echo）且发送队列为空时，直接发送该缓冲区，发送完再归还。
 //   - 零拷贝：开启 ZeroCopyThreshold 后，原地发送与 WriteNoCopy 的大段数据使用 SEND_ZC，
 //     buffer ring 注册为固定缓冲区时使用 SendZCFixed；内存在通知 CQE 到达后才释放。
 //   - 关闭：shutdown(fd) 使在途 recv 以 EOF 结束、在途 send 出错结束，
@@ -47,15 +49,23 @@ type conn struct {
 	recvActive bool
 	sending    bool
 	q          []seg
-	off        int      // 队首段已发送的字节数
+	qBase      []seg // q 的底层数组起点，队列清空后复用，避免每次入队都分配
+	off        int   // 队首段已发送的字节数
+	inflight   int   // 在途 send 覆盖的队首段数
+	iov        [maxIov]unix.Iovec
+	msg        unix.Msghdr
 	spare      [][]byte // 复用的拷贝缓冲区
 	closeAfter bool     // 发送完成后关闭（EchoAndClose）
+	batching   bool     // 正在执行回调：入队的数据暂不发送，回调结束后由 flush 一并发出
 	closed     bool     // 已 shutdown，等待在途请求结束
 	freed      bool
 
 	onRecvH iouring.Handler
 	onSendH iouring.Handler
 }
+
+// maxIov 为一次聚集发送的最大段数
+const maxIov = 16
 
 func newConn(rn *URingNet, fd int) *conn {
 	c := &conn{rn: rn, fd: fd}
@@ -69,25 +79,28 @@ func newConn(rn *URingNet, fd int) *conn {
 
 func (c *conn) armRecv() {
 	c.recvActive = true
-	c.rn.loop.RecvMultishot(c.fd, c.rn.br, 0, c.onRecvH)
+	if c.rn.bundle {
+		c.rn.loop.RecvMultishotBundle(c.fd, c.rn.br, 0, c.onRecvH)
+	} else {
+		c.rn.loop.RecvMultishot(c.fd, c.rn.br, 0, c.onRecvH)
+	}
 }
 
 func (c *conn) onRecv(res int32, flags uint32) {
 	rn := c.rn
-	if bid, data, ok := rn.br.Get(res, flags); ok {
-		held := false
-		if res > 0 && !c.closed {
-			c.ud.Buffer = data
-			c.ud.BufSize = res
-			action := rn.Handler.OnTraffic(&c.ud, rn)
-			held = c.handleAction(action, data, int32(bid))
-			c.ud.Buffer = nil
-			c.ud.BufSize = 0
+	c.batching = true
+	if rn.bundle {
+		// 一个 CQE 可能连续使用多个缓冲区，逐个交给 OnTraffic
+		bufs := rn.br.Bundle(res, flags, rn.bundleBufs[:0])
+		rn.bundleBufs = bufs[:0]
+		for _, b := range bufs {
+			c.deliver(b.Bid, b.Data)
 		}
-		if !held {
-			rn.br.Recycle(bid)
-		}
+	} else if bid, data, ok := rn.br.Get(res, flags); ok {
+		c.deliver(bid, data)
 	}
+	c.batching = false
+	c.flush()
 	if flags&iouring_syscall.IORING_CQE_F_MORE != 0 {
 		return
 	}
@@ -113,6 +126,23 @@ func (c *conn) onRecv(res int32, flags uint32) {
 	}
 }
 
+// deliver 把一个接收缓冲区中的数据交给 OnTraffic，没有被发送队列占用时立即归还
+func (c *conn) deliver(bid uint16, data []byte) {
+	rn := c.rn
+	held := false
+	if len(data) > 0 && !c.closed {
+		c.ud.Buffer = data
+		c.ud.BufSize = int32(len(data))
+		action := rn.Handler.OnTraffic(&c.ud, rn)
+		held = c.handleAction(action, data, int32(bid))
+		c.ud.Buffer = nil
+		c.ud.BufSize = 0
+	}
+	if !held {
+		rn.br.Recycle(bid)
+	}
+}
+
 // handleAction 处理回调返回的动作。recvBuf/bid 为本次接收数据所在的缓冲区
 // （OnOpen 时为 nil/-1）。返回 true 表示该缓冲区被发送队列占用，不能立即归还。
 func (c *conn) handleAction(action Action, recvBuf []byte, bid int32) (held bool) {
@@ -122,8 +152,8 @@ func (c *conn) handleAction(action Action, recvBuf []byte, bid int32) (held bool
 	case EchoAndClose:
 		held = c.writeFrom(c.ud.WriteBuf, recvBuf, bid)
 		c.closeAfter = true
-		if !c.sending {
-			c.close()
+		if !c.sending && len(c.q) == 0 {
+			c.close() // 没有待发送的数据；否则在发送完成后关闭
 		}
 	case Close:
 		c.close()
@@ -143,7 +173,9 @@ func (c *conn) handleAction(action Action, recvBuf []byte, bid int32) (held bool
 	return held
 }
 
-// writeFrom 发送 b：队列为空且 b 位于本次接收缓冲区时原地发送（返回 true），否则拷贝。
+// writeFrom 发送 b：发送队列为空且 b 位于本次接收缓冲区时原地发送（返回 true），否则拷贝。
+// 只在队列为空时原地发送：允许一个连接同时占用多个接收缓冲区会加剧缓冲区耗尽（-ENOBUFS
+// 后需重新提交 recv），实测得不偿失。
 // 原地发送会占用接收缓冲区直到发送完成；被占用的缓冲区超过 maxHeld 时改为拷贝，
 // 避免缓冲区耗尽：耗尽时 multishot recv 以 -ENOBUFS 终止，重新提交的开销远大于一次拷贝。
 func (c *conn) writeFrom(b, recvBuf []byte, bid int32) bool {
@@ -159,14 +191,14 @@ func (c *conn) writeFrom(b, recvBuf []byte, bid int32) bool {
 	return false
 }
 
-// write 把 b 拷贝进发送队列：尽量追加到队尾的拷贝段（队首段在途时不能追加）
+// write 把 b 拷贝进发送队列：尽量追加到队尾的拷贝段（在途 send 覆盖的段不能追加）
 func (c *conn) write(b []byte) {
 	if len(b) == 0 || c.closed {
 		return
 	}
 	if n := len(c.q); n > 0 {
 		last := &c.q[n-1]
-		if last.copied && !(n == 1 && c.sending) {
+		if last.copied && n-1 >= c.inflight {
 			last.b = append(last.b, b...)
 			return
 		}
@@ -202,8 +234,22 @@ func (c *conn) enqueue(s seg) {
 	if !s.copied && rn.zcEnabled() && len(s.b) >= rn.ZeroCopyThreshold {
 		s.zc = &zcRef{bid: s.bid, release: s.release}
 	}
+	if len(c.q) == 0 && c.qBase != nil {
+		c.q = c.qBase[:0]
+	}
 	c.q = append(c.q, s)
-	if !c.sending {
+	if len(c.q) == 1 {
+		c.qBase = c.q // 从空队列开始时 q 位于底层数组起点
+	}
+	if !c.sending && !c.batching {
+		c.off = 0
+		c.sendHead()
+	}
+}
+
+// flush 在回调结束后发送回调期间入队的数据
+func (c *conn) flush() {
+	if !c.sending && len(c.q) > 0 && !c.closed {
 		c.off = 0
 		c.sendHead()
 	}
@@ -222,9 +268,32 @@ func (c *conn) sendHead() {
 			rn.loop.SendZC(c.fd, s.b[c.off:], unix.MSG_NOSIGNAL, 0, h)
 		}
 		rn.zcSends++
+		c.inflight = 1
 		return
 	}
-	rn.loop.Send(c.fd, s.b[c.off:], unix.MSG_NOSIGNAL, c.onSendH)
+	// 聚集发送：从队首起连续的非零拷贝段，最多 maxIov 段
+	n := 0
+	for i := range c.q {
+		if n == maxIov || (i > 0 && c.q[i].zc != nil && rn.zcEnabled()) {
+			break
+		}
+		b := c.q[i].b
+		if i == 0 {
+			b = b[c.off:]
+		}
+		c.iov[n].Base = &b[0]
+		c.iov[n].SetLen(len(b))
+		n++
+	}
+	c.inflight = n
+	if n == 1 {
+		rn.loop.Send(c.fd, s.b[c.off:], unix.MSG_NOSIGNAL, c.onSendH)
+		return
+	}
+	c.msg = unix.Msghdr{Iov: &c.iov[0]}
+	c.msg.SetIovlen(n)
+	rn.loop.Sendmsg(c.fd, &c.msg, unix.MSG_NOSIGNAL, c.onSendH)
+	rn.gatherSends++
 }
 
 // zcHandler 处理 SEND_ZC 的结果 CQE 与通知 CQE
@@ -253,19 +322,24 @@ func (c *conn) zcHandler(ref *zcRef) iouring.Handler {
 }
 
 func (c *conn) onSend(res int32, flags uint32) {
+	c.inflight = 0
 	if res <= 0 || c.closed {
 		// 出错（含 shutdown 后的 -EPIPE / -ECANCELED）
 		c.sending = false
 		c.close()
 		return
 	}
-	c.off += int(res)
-	if c.off < len(c.q[0].b) {
-		c.sendHead() // 短写：续写剩余部分
-		return
+	// 按发送的字节数依次移除已发完的段；短写时停在未发完的段上
+	for remain := int(res); remain > 0; {
+		left := len(c.q[0].b) - c.off
+		if remain < left {
+			c.off += remain
+			break
+		}
+		remain -= left
+		c.popHead()
+		c.off = 0
 	}
-	c.popHead()
-	c.off = 0
 	if len(c.q) > 0 {
 		c.sendHead()
 		return
@@ -286,9 +360,6 @@ func (c *conn) popHead() {
 	s := c.q[0]
 	c.q[0] = seg{}
 	c.q = c.q[1:]
-	if len(c.q) == 0 {
-		c.q = c.q[:0:0]
-	}
 	c.finish(s)
 }
 

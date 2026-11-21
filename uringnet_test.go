@@ -380,7 +380,7 @@ func TestWriteNoCopy(t *testing.T) {
 		}
 		want := append(append([]byte(nil), big...), "END"...)
 		for i := 0; i < 5; i++ {
-			c.Write([]byte("go"))
+			c.Write([]byte("x")) // 1 字节：TCP 是字节流，多字节的写入可能被拆成多次 OnTraffic
 			got := make([]byte, len(want))
 			c.SetReadDeadline(time.Now().Add(10 * time.Second))
 			if _, err := io.ReadFull(c, got); err != nil {
@@ -405,6 +405,59 @@ func TestSpinTimeEcho(t *testing.T) {
 	if h.closed.Load() != 16 {
 		t.Fatalf("closed = %d", h.closed.Load())
 	}
+}
+
+// 聚集发送：WriteNoCopy 的大块与 WriteBuf 的小尾巴不能合并，用一次 sendmsg 发出
+func TestGatherSend(t *testing.T) {
+	big := make([]byte, 64<<10)
+	rand.Read(big)
+	h := &testHandler{}
+	h.traffic = func(d *UserData) Action {
+		d.WriteNoCopy(big, nil)
+		d.WriteBuf = append(d.WriteBuf, "END"...)
+		return Write
+	}
+	loop, addr := startServerCfg(t, h, 1, false, 64, nil)
+	defer loop.Shutdown()
+	c, err := net.Dial("tcp4", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	want := append(append([]byte(nil), big...), "END"...)
+	for i := 0; i < 20; i++ {
+		c.Write([]byte("x"))
+		got := make([]byte, len(want))
+		c.SetReadDeadline(time.Now().Add(10 * time.Second))
+		if _, err := io.ReadFull(c, got); err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("round %d: data mismatch", i)
+		}
+	}
+	rn := loop.RingNet[0]
+	res := make(chan int, 1)
+	rn.Post(func() { res <- rn.gatherSends })
+	n := <-res
+	t.Logf("gather sends: %d", n)
+	if n == 0 {
+		t.Error("sendmsg gather send was never used")
+	}
+}
+
+// recv bundle 只在包含数据正确性修复的内核（6.16+）上测试
+func TestRecvBundleEcho(t *testing.T) {
+	if !bundleSafeKernel() {
+		t.Skip("recv bundle needs Linux 6.16+ (earlier kernels have known data-gap bugs)")
+	}
+	h := &testHandler{}
+	loop, addr := startServerCfg(t, h, 2, false, 64, func(rn *URingNet) { rn.RecvBundle = BundleOn })
+	defer loop.Shutdown()
+	if !loop.RingNet[0].bundle {
+		t.Skip("kernel does not support recv bundles")
+	}
+	runEchoClients(t, addr, 32, []int{1, 100, 2048, 2049, 65536, 1 << 20})
 }
 
 func TestUnsupportedProtocol(t *testing.T) {

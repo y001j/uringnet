@@ -13,6 +13,9 @@
 | `uringnet-spin` | 本项目，`SpinTime = 50µs` |
 | `uringnet-zc` | 本项目，`ZeroCopyThreshold = 16KB` |
 
+`servers/uringnet` 支持参数：`-bufs`（接收缓冲区数量）、`-bufsize`、`-spin`（如 `50us`）、`-zc`（零拷贝阈值）、
+`-bundle auto|on|off`（recv bundle；`on` 在 6.16 之前的内核上可能导致数据错乱，只用于评估性能）。
+
 客户端（`client/`）：c 个长连接，每个连接循环「写 p 个 s 字节的请求 → 读回全部响应」，
 输出 QPS、客户端 CPU 和往返延迟 p50/p99；脚本另外记录服务端 CPU。
 

@@ -5,7 +5,7 @@ import collections, re, statistics as st, sys
 
 rows = collections.defaultdict(list)
 names = []
-pat = re.compile(r"([\w-]+)\s+c=(\d+) p=(\d+) s=(\d+) qps=(\d+) clientcpu=(\d+)% p50=(\d+)us p99=(\d+)us servercpu=(\d+)%")
+pat = re.compile(r"([\w+-]+)\s+c=(\d+) p=(\d+) s=(\d+) qps=(\d+) clientcpu=(\d+)% p50=(\d+)us p99=(\d+)us servercpu=(\d+)%")
 for line in open(sys.argv[1]):
     if line.startswith("#"):
         print(line.strip())

@@ -51,6 +51,12 @@ type URingNet struct {
 	// 零拷贝一般在 10KB 以上才划算；发往本机（回环）的数据内核总会拷贝，没有收益。
 	ZeroCopyThreshold int
 
+	// RecvBundle 控制 recv bundle（一次接收连续填充多个缓冲区，socket 中积压数据多时显著减少
+	// 完成事件与回调次数）。默认 BundleAuto：仅在 Linux 6.16+ 上启用。6.10–6.15 的内核
+	// 存在会使接收数据出现空洞的 bug（上游修复 3a08988123c8、26ec15e4b0c1、178b8ff66ff8，
+	// 可能已回移到部分稳定版本），BundleOn 强制启用，仅用于测试或确认内核已包含修复的场景。
+	RecvBundle BundleMode
+
 	index      int
 	entries    uint32
 	ownsSocket bool // SocketFd 是否由本实例独占（ReusePort 时每个实例一个监听 socket）
@@ -60,14 +66,17 @@ type URingNet struct {
 	ringloop *Ringloop
 
 	// 以下字段仅在 Loop 线程中访问
-	conns    map[int]*conn
-	held     int     // 被发送队列占用的接收缓冲区数量
-	maxHeld  int     // 原地发送最多占用的接收缓冲区数量（缓冲区总数的一半）
-	starved  []*conn // 因缓冲区耗尽（-ENOBUFS）而暂停接收的连接
-	stopping bool
-	fixedIdx int  // 接收缓冲区的固定缓冲区下标，-1 表示未注册
-	zcOff    bool // 内核不支持零拷贝时自动关闭
-	zcSends  int  // SEND_ZC 次数（测试用）
+	conns       map[int]*conn
+	held        int     // 被发送队列占用的接收缓冲区数量
+	maxHeld     int     // 原地发送最多占用的接收缓冲区数量（缓冲区总数的一半）
+	starved     []*conn // 因缓冲区耗尽（-ENOBUFS）而暂停接收的连接
+	stopping    bool
+	fixedIdx    int  // 接收缓冲区的固定缓冲区下标，-1 表示未注册
+	zcOff       bool // 内核不支持零拷贝时自动关闭
+	zcSends     int  // SEND_ZC 次数（测试用）
+	bundle      bool // 是否使用 recv bundle
+	bundleBufs  []iouring.BundleBuf
+	gatherSends int // sendmsg 聚集发送次数（测试用）
 
 	connCount atomic.Int64
 
@@ -117,6 +126,26 @@ func (d *UserData) LocalAddr() net.Addr {
 		return nil
 	}
 	return sockaddrToNetAddr(sa)
+}
+
+// BundleMode 见 URingNet.RecvBundle
+type BundleMode int
+
+const (
+	BundleAuto BundleMode = iota // Linux 6.16+ 且内核支持时启用
+	BundleOn                     // 内核支持时启用（不检查版本）
+	BundleOff                    // 不使用
+)
+
+// bundleSafeKernel 判断内核是否包含 recv bundle 的数据正确性修复（主线 6.16）
+func bundleSafeKernel() bool {
+	var u unix.Utsname
+	if unix.Uname(&u) != nil {
+		return false
+	}
+	var major, minor int
+	fmt.Sscanf(unix.ByteSliceToString(u.Release[:]), "%d.%d", &major, &minor)
+	return major > 6 || (major == 6 && minor >= 16)
 }
 
 // NetAddress 描述监听地址
@@ -251,6 +280,8 @@ func (rn *URingNet) start(bufferCount int) error {
 	rn.loop = l
 	rn.br = l.BufferRing(0)
 	rn.maxHeld = bufferCount / 2
+	rn.bundle = l.Features()&iouring_syscall.IORING_FEAT_RECVSEND_BUNDLE != 0 &&
+		(rn.RecvBundle == BundleOn || (rn.RecvBundle == BundleAuto && bundleSafeKernel()))
 	rn.fixedIdx = rn.br.FixedIndex()
 	rn.conns = make(map[int]*conn)
 	return nil
@@ -292,11 +323,14 @@ func (rn *URingNet) openConn(fd int) {
 	rn.conns[fd] = c
 	rn.connCount.Add(1)
 
+	c.batching = true
 	out, action := rn.Handler.OnOpen(&c.ud)
 	if len(out) > 0 {
 		c.write(out)
 	}
 	c.handleAction(action, nil, -1)
+	c.batching = false
+	c.flush()
 	if !c.closed {
 		c.armRecv()
 	}

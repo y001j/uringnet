@@ -86,6 +86,7 @@ func main() {
 | `URingNet.BufferSize` | size of one receive buffer, set before `SetLoops` (default 16KB) |
 | `URingNet.SpinTime` | busy-poll before blocking (e.g. `50*time.Microsecond`): lower latency at the cost of CPU |
 | `URingNet.ZeroCopyThreshold` | enable zero-copy send (`IORING_OP_SEND_ZC`) for writes of at least this many bytes; 0 disables |
+| `URingNet.RecvBundle` | recv bundles: one completion can carry several receive buffers. `BundleAuto` (default) enables them on Linux 6.16+ only; see below |
 | `SetLoops(rings, bufferCount)` | create the event loops; `bufferCount` (receive buffers per ring) is rounded up to a power of 2 (max 32768). See *Sizing receive buffers* below |
 | `UserData.WriteNoCopy(b, release)` | queue `b` without copying; `release` is called once the kernel no longer uses it |
 | `Ringloop.RunMany()` / `Wait()` / `Shutdown()` | start accepting / block until shut down / close all connections and loops |
@@ -96,7 +97,8 @@ Callback semantics:
 - All callbacks except `OnTick` run on the ring's event-loop thread and must not block.
 - `UserData` is per connection and lives for the whole connection; use `UserData.Context` for per-connection state.
 - Actions: `Echo`/`Write` send `WriteBuf`; `EchoAndClose` sends then closes; `Close` closes; `Shutdown` shuts down the engine; `None`/`Read` do nothing (receiving is always active).
-- Writes on one connection are ordered; writes issued while a send is in flight are coalesced; short writes are handled.
+- Writes on one connection are ordered; short writes are handled. Everything queued during one callback is sent together
+  after it returns, and separate segments (for example `WriteNoCopy` data plus a `WriteBuf` header) go out in one `sendmsg`.
 - `OnClose` is called exactly once per connection, including peer close, errors and `Shutdown`.
 
 ### Sizing receive buffers
@@ -110,6 +112,17 @@ Each ring receives into a pool of `bufferCount` buffers of `BufferSize` bytes (a
   8 requests in flight per connection ran about 1.5x faster with 64 buffers than with 1024.
 - `256` (the examples' value) is a reasonable default. Use more for many busy connections per ring, fewer for a few
   connections with bulk transfers.
+
+### Recv bundles
+
+With `IORING_RECVSEND_BUNDLE` one multishot recv completion can fill several consecutive receive buffers, so data that
+piled up in the socket costs one completion instead of one per buffer. Each buffer is still passed to `OnTraffic`
+separately. In the benchmark on Linux 6.17, bundles improved pipelined 16KB echo by 6–13%.
+
+Kernels 6.10–6.15 have bugs that can leave **gaps in the received data** when bundles are used (fixed upstream by
+`3a08988123c8` in 6.15 and `26ec15e4b0c1`/`178b8ff66ff8` in 6.16, all tagged for stable). We reproduced the corruption
+on 6.10 and verified correct data on 6.17. Therefore `BundleAuto` only enables bundles on 6.16+. `BundleOn` forces them
+(only if you know your kernel has the fixes), and `BundleOff` disables them.
 
 ### Zero-copy send
 

@@ -1,4 +1,4 @@
-github.com/y001j/iouring-go v0.0.0-20261121194714-6245d28f9026 h1:vWTiOhNq7PJZBtPxBqO/vV5/osYAlAUDnueG2gLpM5Q=
-github.com/y001j/iouring-go v0.0.0-20261121194714-6245d28f9026/go.mod h1:bZt27FNWrWySEfHi+M2kXfm4sRbxQnMLweraSvxe7Os=
+github.com/y001j/iouring-go v0.0.0-20261121220609-b78cda6b08c0 h1:77lu07qR82QnlxBhQ1qVlu0UGqpSnmtg/bHt2Q0ZneE=
+github.com/y001j/iouring-go v0.0.0-20261121220609-b78cda6b08c0/go.mod h1:bZt27FNWrWySEfHi+M2kXfm4sRbxQnMLweraSvxe7Os=
 golang.org/x/sys v0.12.0 h1:CM0HF96J0hcLAwsHPJZjfdNzs0gftsLfgKt57wWHJ0o=
 golang.org/x/sys v0.12.0/go.mod h1:oPkhp1MJrh7nUepCBck5+mAzfO9JrbApNNgaTdGDITg=
