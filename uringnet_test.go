@@ -1,0 +1,510 @@
+//go:build linux
+// +build linux
+
+package uringnet
+
+import (
+	"bytes"
+	"crypto/rand"
+	"fmt"
+	"io"
+	"net"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+
+	socket "github.com/y001j/uringnet/sockets"
+)
+
+type testHandler struct {
+	BuiltinEventEngine
+	opened, closed atomic.Int64
+	traffic        func(d *UserData) Action
+}
+
+func (h *testHandler) OnOpen(d *UserData) ([]byte, Action) {
+	h.opened.Add(1)
+	return nil, None
+}
+
+func (h *testHandler) OnClose(d UserData) Action {
+	h.closed.Add(1)
+	return None
+}
+
+func (h *testHandler) OnTraffic(d *UserData, _ *URingNet) Action {
+	if h.traffic != nil {
+		return h.traffic(d)
+	}
+	d.WriteBuf = d.Buffer
+	return Echo
+}
+
+func freePort(t testing.TB) string {
+	l, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	return l.Addr().String()
+}
+
+func startServer(t testing.TB, h EventHandler, rings int, reusePort bool) (*Ringloop, string) {
+	return startServerBufs(t, h, rings, reusePort, 256)
+}
+
+func startServerBufs(t testing.TB, h EventHandler, rings int, reusePort bool, bufs int) (*Ringloop, string) {
+	return startServerCfg(t, h, rings, reusePort, bufs, nil)
+}
+
+func startServerCfg(t testing.TB, h EventHandler, rings int, reusePort bool, bufs int, cfg func(*URingNet)) (*Ringloop, string) {
+	addr := freePort(t)
+	opts := socket.SocketOptions{TCPNoDelay: socket.TCPNoDelay, ReusePort: reusePort}
+	rns, err := NewMany(NetAddress{AddrType: socket.Tcp4, Address: addr}, 1024, false, rings, opts, h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rn := range rns {
+		rn.BufferSize = 2048
+		if cfg != nil {
+			cfg(rn)
+		}
+	}
+	loop, err := SetLoops(rns, bufs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loop.RunMany()
+	return loop, addr
+}
+
+func TestEchoConcurrent(t *testing.T) {
+	h := &testHandler{}
+	loop, addr := startServer(t, h, 4, true)
+	defer loop.Shutdown()
+
+	sizes := []int{1, 100, 2048, 2049, 65536, 1 << 20}
+	var wg sync.WaitGroup
+	errs := make(chan error, 64)
+	for i := 0; i < 64; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			c, err := net.Dial("tcp4", addr)
+			if err != nil {
+				errs <- err
+				return
+			}
+			defer c.Close()
+			for _, n := range sizes {
+				msg := make([]byte, n)
+				rand.Read(msg)
+				// 并发写读，避免大消息在双方缓冲区都满时死锁
+				go c.Write(msg)
+				got := make([]byte, n)
+				c.SetReadDeadline(time.Now().Add(10 * time.Second))
+				if _, err := io.ReadFull(c, got); err != nil {
+					errs <- fmt.Errorf("conn %d size %d: %w", i, n, err)
+					return
+				}
+				if !bytes.Equal(got, msg) {
+					errs <- fmt.Errorf("conn %d size %d: data mismatch", i, n)
+					return
+				}
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return h.closed.Load() == 64 }, "OnClose for all connections")
+	if h.opened.Load() != 64 {
+		t.Fatalf("opened = %d", h.opened.Load())
+	}
+}
+
+// 缓冲区远少于连接数：零拷贝 send 占用缓冲区导致 -ENOBUFS，验证暂停/恢复接收后数据完整
+func TestBufferStarvation(t *testing.T) {
+	h := &testHandler{}
+	loop, addr := startServerBufs(t, h, 1, false, 4)
+	defer loop.Shutdown()
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 32)
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			c, err := net.Dial("tcp4", addr)
+			if err != nil {
+				errs <- err
+				return
+			}
+			defer c.Close()
+			msg := make([]byte, 256<<10)
+			rand.Read(msg)
+			go c.Write(msg)
+			got := make([]byte, len(msg))
+			c.SetReadDeadline(time.Now().Add(20 * time.Second))
+			if _, err := io.ReadFull(c, got); err != nil {
+				errs <- fmt.Errorf("conn %d: %w", i, err)
+				return
+			}
+			if !bytes.Equal(got, msg) {
+				errs <- fmt.Errorf("conn %d: data mismatch", i)
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatal(err)
+	}
+}
+
+// 客户端不读、服务端持续写大量数据：验证在途 send 与 pending 合并、短写和关闭时不泄漏
+func TestPeerCloseDuringSend(t *testing.T) {
+	big := make([]byte, 256<<10)
+	h := &testHandler{traffic: func(d *UserData) Action {
+		d.WriteBuf = big
+		return Write
+	}}
+	loop, addr := startServer(t, h, 1, false)
+	defer loop.Shutdown()
+	for i := 0; i < 20; i++ {
+		c, err := net.Dial("tcp4", addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for j := 0; j < 10; j++ {
+			c.Write([]byte("x"))
+		}
+		time.Sleep(5 * time.Millisecond)
+		c.Close()
+	}
+	waitFor(t, func() bool { return h.closed.Load() == 20 }, "OnClose after peer close")
+	if n := loop.RingNet[0].Connections(); n != 0 {
+		t.Fatalf("connections = %d", n)
+	}
+}
+
+func TestEchoAndClose(t *testing.T) {
+	h := &testHandler{traffic: func(d *UserData) Action {
+		d.WriteBuf = append(d.WriteBuf, "bye:"...)
+		d.WriteBuf = append(d.WriteBuf, d.Buffer...)
+		return EchoAndClose
+	}}
+	loop, addr := startServer(t, h, 2, false)
+	defer loop.Shutdown()
+
+	c, err := net.Dial("tcp4", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.Write([]byte("hello"))
+	c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	got, err := io.ReadAll(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "bye:hello" {
+		t.Fatalf("got %q", got)
+	}
+	waitFor(t, func() bool { return h.closed.Load() == 1 }, "OnClose")
+}
+
+func TestCloseAction(t *testing.T) {
+	h := &testHandler{traffic: func(d *UserData) Action { return Close }}
+	loop, addr := startServer(t, h, 1, false)
+	defer loop.Shutdown()
+
+	c, err := net.Dial("tcp4", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.Write([]byte("x"))
+	c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if n, err := c.Read(make([]byte, 1)); n != 0 || err == nil {
+		t.Fatalf("expected EOF, got n=%d err=%v", n, err)
+	}
+	waitFor(t, func() bool { return h.closed.Load() == 1 }, "OnClose")
+}
+
+// WriteBuf = Buffer 后框架必须丢弃 WriteBuf，下次 append 不能写进已归还的接收缓冲区
+func TestWriteBufAliasReset(t *testing.T) {
+	var aliasLeft atomic.Bool
+	h := &testHandler{}
+	h.traffic = func(d *UserData) Action {
+		if cap(d.WriteBuf) != 0 && overlaps(d.WriteBuf, d.Buffer) {
+			aliasLeft.Store(true)
+		}
+		d.WriteBuf = d.Buffer
+		return Echo
+	}
+	loop, addr := startServer(t, h, 1, false)
+	defer loop.Shutdown()
+	c, _ := net.Dial("tcp4", addr)
+	defer c.Close()
+	buf := make([]byte, 4)
+	for i := 0; i < 50; i++ {
+		c.Write([]byte("ping"))
+		io.ReadFull(c, buf)
+	}
+	if aliasLeft.Load() {
+		t.Fatal("WriteBuf still aliases the receive buffer")
+	}
+}
+
+func TestShutdown(t *testing.T) {
+	h := &testHandler{}
+	loop, addr := startServer(t, h, 2, false)
+	var conns []net.Conn
+	for i := 0; i < 10; i++ {
+		c, err := net.Dial("tcp4", addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		conns = append(conns, c)
+	}
+	waitFor(t, func() bool { return h.opened.Load() == 10 }, "OnOpen")
+	loop.Shutdown()
+	loop.Wait()
+	if h.closed.Load() != 10 {
+		t.Fatalf("closed = %d", h.closed.Load())
+	}
+	for _, c := range conns {
+		c.SetReadDeadline(time.Now().Add(2 * time.Second))
+		if _, err := c.Read(make([]byte, 1)); err == nil {
+			t.Fatal("expected connection closed")
+		}
+		c.Close()
+	}
+	if _, err := net.DialTimeout("tcp4", addr, time.Second); err == nil {
+		t.Fatal("listener still open after Shutdown")
+	}
+}
+
+// echo 客户端：多个连接并发收发随机数据并校验
+func runEchoClients(t *testing.T, addr string, conns int, sizes []int) {
+	t.Helper()
+	var wg sync.WaitGroup
+	errs := make(chan error, conns)
+	for i := 0; i < conns; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			c, err := net.Dial("tcp4", addr)
+			if err != nil {
+				errs <- err
+				return
+			}
+			defer c.Close()
+			for _, n := range sizes {
+				msg := make([]byte, n)
+				rand.Read(msg)
+				go c.Write(msg)
+				got := make([]byte, n)
+				c.SetReadDeadline(time.Now().Add(10 * time.Second))
+				if _, err := io.ReadFull(c, got); err != nil {
+					errs <- fmt.Errorf("conn %d size %d: %w", i, n, err)
+					return
+				}
+				if !bytes.Equal(got, msg) {
+					errs <- fmt.Errorf("conn %d size %d: data mismatch", i, n)
+					return
+				}
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatal(err)
+	}
+}
+
+// 零拷贝发送：原地发送接收缓冲区使用 SEND_ZC（固定缓冲区），缓冲区在通知到达后才归还
+func TestZeroCopyEcho(t *testing.T) {
+	h := &testHandler{}
+	loop, addr := startServerCfg(t, h, 2, false, 64, func(rn *URingNet) { rn.ZeroCopyThreshold = 512 })
+	defer loop.Shutdown()
+
+	runEchoClients(t, addr, 16, []int{100, 1500, 2048, 4096, 65536, 1 << 20})
+
+	total := 0
+	for _, rn := range loop.RingNet {
+		res := make(chan [2]int, 1)
+		rn.Post(func() { res <- [2]int{rn.zcSends, rn.fixedIdx} })
+		r := <-res
+		t.Logf("ring %d: zcSends=%d fixedIdx=%d zcOff=%v", rn.index, r[0], r[1], rn.zcOff)
+		total += r[0]
+	}
+	if total == 0 {
+		t.Error("SEND_ZC was never used")
+	}
+	waitFor(t, func() bool { return h.closed.Load() == 16 }, "OnClose")
+	// 所有被占用的接收缓冲区都已归还（通知 CQE 都已处理）
+	for _, rn := range loop.RingNet {
+		waitFor(t, func() bool {
+			res := make(chan int, 1)
+			rn.Post(func() { res <- rn.held })
+			return <-res == 0
+		}, "held buffers released")
+	}
+}
+
+// WriteNoCopy：数据按顺序发出（先于本次的 WriteBuf），release 每个缓冲区恰好调用一次
+func TestWriteNoCopy(t *testing.T) {
+	big := make([]byte, 300<<10)
+	rand.Read(big)
+	var released atomic.Int64
+	h := &testHandler{}
+	h.traffic = func(d *UserData) Action {
+		if err := d.WriteNoCopy(big, func() { released.Add(1) }); err != nil {
+			t.Error(err)
+		}
+		d.WriteBuf = append(d.WriteBuf, "END"...)
+		return Write
+	}
+	for _, zc := range []int{0, 16 << 10} {
+		released.Store(0)
+		loop, addr := startServerCfg(t, h, 1, false, 64, func(rn *URingNet) { rn.ZeroCopyThreshold = zc })
+		c, err := net.Dial("tcp4", addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := append(append([]byte(nil), big...), "END"...)
+		for i := 0; i < 5; i++ {
+			c.Write([]byte("go"))
+			got := make([]byte, len(want))
+			c.SetReadDeadline(time.Now().Add(10 * time.Second))
+			if _, err := io.ReadFull(c, got); err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(got, want) {
+				t.Fatalf("zc=%d round %d: data mismatch", zc, i)
+			}
+		}
+		c.Close()
+		waitFor(t, func() bool { return released.Load() == 5 }, fmt.Sprintf("release x5 (zc=%d), got %d", zc, released.Load()))
+		loop.Shutdown()
+	}
+}
+
+func TestSpinTimeEcho(t *testing.T) {
+	h := &testHandler{}
+	loop, addr := startServerCfg(t, h, 2, false, 64, func(rn *URingNet) { rn.SpinTime = 50 * time.Microsecond })
+	runEchoClients(t, addr, 16, []int{1, 128, 4096, 65536})
+	loop.Shutdown()
+	loop.Wait()
+	if h.closed.Load() != 16 {
+		t.Fatalf("closed = %d", h.closed.Load())
+	}
+}
+
+func TestUnsupportedProtocol(t *testing.T) {
+	if _, err := NewMany(NetAddress{AddrType: socket.Udp4, Address: "127.0.0.1:0"}, 64, false, 1, socket.SocketOptions{}, &testHandler{}); err == nil {
+		t.Fatal("expected error for udp")
+	}
+}
+
+func waitFor(t testing.TB, cond func() bool, what string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timeout waiting for %s", what)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// ---- 基准测试：c 个长连接 ping-pong ----
+
+func benchPingPong(b *testing.B, addr string, conns, size int) {
+	msg := make([]byte, size)
+	var ops atomic.Int64
+	var wg sync.WaitGroup
+	per := b.N/conns + 1
+	b.SetBytes(int64(size))
+	b.ResetTimer()
+	for i := 0; i < conns; i++ {
+		c, err := net.Dial("tcp4", addr)
+		if err != nil {
+			b.Fatal(err)
+		}
+		wg.Add(1)
+		go func(c net.Conn) {
+			defer wg.Done()
+			defer c.Close()
+			buf := make([]byte, size)
+			for j := 0; j < per; j++ {
+				if _, err := c.Write(msg); err != nil {
+					return
+				}
+				if _, err := io.ReadFull(c, buf); err != nil {
+					return
+				}
+				ops.Add(1)
+			}
+		}(c)
+	}
+	wg.Wait()
+	b.ReportMetric(float64(ops.Load())/b.Elapsed().Seconds(), "req/s")
+}
+
+func stdEchoServer(b *testing.B) (string, func()) {
+	l, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		b.Fatal(err)
+	}
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				buf := make([]byte, 4096)
+				io.CopyBuffer(c, c, buf)
+				c.Close()
+			}()
+		}
+	}()
+	return l.Addr().String(), func() { l.Close() }
+}
+
+func BenchmarkEcho(b *testing.B) {
+	for _, conns := range []int{1, 64, 512} {
+		for _, size := range []int{128, 16384} {
+			b.Run(fmt.Sprintf("uringnet/c%d/%dB", conns, size), func(b *testing.B) {
+				h := &testHandler{}
+				addr := freePort(b)
+				opts := socket.SocketOptions{TCPNoDelay: socket.TCPNoDelay, ReusePort: true}
+				rns, err := NewMany(NetAddress{AddrType: socket.Tcp4, Address: addr}, 4096, false, 4, opts, h)
+				if err != nil {
+					b.Fatal(err)
+				}
+				loop, err := SetLoops(rns, 4096)
+				if err != nil {
+					b.Fatal(err)
+				}
+				loop.RunMany()
+				defer loop.Shutdown()
+				benchPingPong(b, addr, conns, size)
+			})
+			b.Run(fmt.Sprintf("std/c%d/%dB", conns, size), func(b *testing.B) {
+				addr, stop := stdEchoServer(b)
+				defer stop()
+				benchPingPong(b, addr, conns, size)
+			})
+		}
+	}
+}
+

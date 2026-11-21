@@ -1,12 +1,7 @@
 module github.com/y001j/uringnet
 
-go 1.19
+go 1.20
 
-//replace uring => ./uring
+require golang.org/x/sys v0.12.0
 
-require (
-	github.com/dshulyak/uring v0.0.0-20210209113719-1b2ec51f1542
-	github.com/panjf2000/gnet/v2 v2.3.3
-	github.com/stretchr/testify v1.8.4
-	golang.org/x/sys v0.12.0
-)
+require github.com/y001j/iouring-go v0.0.0-20261121194714-6245d28f9026

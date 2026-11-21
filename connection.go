@@ -1,23 +1,402 @@
+//go:build linux
+// +build linux
+
 package uringnet
 
 import (
-	"bytes"
+	"syscall"
+	"unsafe"
+
+	iouring "github.com/y001j/iouring-go"
+	iouring_syscall "github.com/y001j/iouring-go/syscall"
 	"golang.org/x/sys/unix"
-	"net"
 )
 
+// seg 是发送队列中的一段数据
+type seg struct {
+	b       []byte
+	bid     int32  // >= 0：b 位于该 provided buffer 中，发送完后归还
+	release func() // 非 nil：b 由用户提供（WriteNoCopy），内核用完后调用
+	copied  bool   // b 是框架的拷贝缓冲区（可以追加、发送完后复用）
+	zc      *zcRef // 非 nil：使用 SEND_ZC 发送
+}
+
+// zcRef 跟踪一段零拷贝数据的在途通知：段发送完毕（done）且所有通知 CQE 到达（n == 0）后才能释放
+type zcRef struct {
+	n       int
+	done    bool
+	bid     int32
+	release func()
+}
+
+// conn 是一个 TCP 连接的状态机，只在所属 URingNet 的 Loop 线程中访问。
+//
+//   - 读：一个 multishot recv 持续接收，数据落在 provided buffer ring 中。
+//   - 写：发送队列按段组织，同一时刻最多一个 send 在途，保证字节流顺序；处理短写。
+//     拷贝的小数据合并到同一段中（自然合并多个小响应，适合 pipelining）。
+//   - 原地发送：WriteBuf 指向本次接收缓冲区（如 echo）且队列为空时，直接发送该缓冲区，发送完再归还。
+//   - 零拷贝：开启 ZeroCopyThreshold 后，原地发送与 WriteNoCopy 的大段数据使用 SEND_ZC，
+//     buffer ring 注册为固定缓冲区时使用 SendZCFixed；内存在通知 CQE 到达后才释放。
+//   - 关闭：shutdown(fd) 使在途 recv 以 EOF 结束、在途 send 出错结束，
+//     等 recv/send 都结束后才 close(fd)，避免 fd 被复用后串到新连接上。
 type conn struct {
-	fd             int           // file descriptor
-	ctx            interface{}   // user-defined context
-	peer           unix.Sockaddr // remote socket address
-	loop           *Ringloop     // connected event-loop
-	buffer         []byte        // buffer for the latest bytes
-	opened         bool          // connection opened event fired
-	localAddr      net.Addr      // local addr
-	remoteAddr     net.Addr      // remote addr
-	isDatagram     bool          // UDP protocol
-	inboundBuffer  bytes.Buffer  //elastic.RingBuffer      // buffer for leftover data from the peer
-	outboundBuffer *bytes.Buffer //*elastic.Buffer         // buffer for data that is eligible to be sent to the peer
-	//pollAttachment *netpoll.PollAttachment // connection attachment for poller
-	rawSockAddr unix.RawSockaddrAny
+	ud UserData
+	rn *URingNet
+	fd int
+
+	recvActive bool
+	sending    bool
+	q          []seg
+	off        int      // 队首段已发送的字节数
+	spare      [][]byte // 复用的拷贝缓冲区
+	closeAfter bool     // 发送完成后关闭（EchoAndClose）
+	closed     bool     // 已 shutdown，等待在途请求结束
+	freed      bool
+
+	onRecvH iouring.Handler
+	onSendH iouring.Handler
+}
+
+func newConn(rn *URingNet, fd int) *conn {
+	c := &conn{rn: rn, fd: fd}
+	c.ud.Fd = int32(fd)
+	c.ud.c = c
+	// 缓存方法值，避免每次提交请求都分配闭包
+	c.onRecvH = c.onRecv
+	c.onSendH = c.onSend
+	return c
+}
+
+func (c *conn) armRecv() {
+	c.recvActive = true
+	c.rn.loop.RecvMultishot(c.fd, c.rn.br, 0, c.onRecvH)
+}
+
+func (c *conn) onRecv(res int32, flags uint32) {
+	rn := c.rn
+	if bid, data, ok := rn.br.Get(res, flags); ok {
+		held := false
+		if res > 0 && !c.closed {
+			c.ud.Buffer = data
+			c.ud.BufSize = res
+			action := rn.Handler.OnTraffic(&c.ud, rn)
+			held = c.handleAction(action, data, int32(bid))
+			c.ud.Buffer = nil
+			c.ud.BufSize = 0
+		}
+		if !held {
+			rn.br.Recycle(bid)
+		}
+	}
+	if flags&iouring_syscall.IORING_CQE_F_MORE != 0 {
+		return
+	}
+
+	// multishot recv 已终止
+	c.recvActive = false
+	switch {
+	case c.closed:
+		c.maybeFree()
+	case res == -int32(syscall.ENOBUFS):
+		// 缓冲区暂时耗尽。若有缓冲区被在途 send 占用，等它归还后再重新提交；
+		// 否则所有已处理的缓冲区都已归还，下一次 io_uring_enter 会先发布再提交，可立即重试。
+		if rn.held > 0 {
+			rn.starved = append(rn.starved, c)
+		} else {
+			c.armRecv()
+		}
+	case res > 0:
+		c.armRecv()
+	default:
+		// EOF（res == 0）或出错
+		c.close()
+	}
+}
+
+// handleAction 处理回调返回的动作。recvBuf/bid 为本次接收数据所在的缓冲区
+// （OnOpen 时为 nil/-1）。返回 true 表示该缓冲区被发送队列占用，不能立即归还。
+func (c *conn) handleAction(action Action, recvBuf []byte, bid int32) (held bool) {
+	switch action {
+	case Echo, Write:
+		held = c.writeFrom(c.ud.WriteBuf, recvBuf, bid)
+	case EchoAndClose:
+		held = c.writeFrom(c.ud.WriteBuf, recvBuf, bid)
+		c.closeAfter = true
+		if !c.sending {
+			c.close()
+		}
+	case Close:
+		c.close()
+	case Shutdown:
+		if rl := c.rn.ringloop; rl != nil {
+			go rl.Shutdown()
+		}
+	}
+	// 重置 WriteBuf 以便用户复用其底层数组（如 append 构造响应）；
+	// 但如果它指向接收缓冲区（data.WriteBuf = data.Buffer），必须丢弃，
+	// 否则用户下次 append 会写进已归还给内核的缓冲区。
+	if overlaps(c.ud.WriteBuf, recvBuf) {
+		c.ud.WriteBuf = nil
+	} else {
+		c.ud.WriteBuf = c.ud.WriteBuf[:0]
+	}
+	return held
+}
+
+// writeFrom 发送 b：队列为空且 b 位于本次接收缓冲区时原地发送（返回 true），否则拷贝
+func (c *conn) writeFrom(b, recvBuf []byte, bid int32) bool {
+	if len(b) == 0 || c.closed {
+		return false
+	}
+	if bid >= 0 && len(c.q) == 0 && within(b, recvBuf) {
+		c.rn.held++
+		c.enqueue(seg{b: b, bid: bid, release: nil})
+		return true
+	}
+	c.write(b)
+	return false
+}
+
+// write 把 b 拷贝进发送队列：尽量追加到队尾的拷贝段（队首段在途时不能追加）
+func (c *conn) write(b []byte) {
+	if len(b) == 0 || c.closed {
+		return
+	}
+	if n := len(c.q); n > 0 {
+		last := &c.q[n-1]
+		if last.copied && !(n == 1 && c.sending) {
+			last.b = append(last.b, b...)
+			return
+		}
+	}
+	var buf []byte
+	if n := len(c.spare); n > 0 {
+		buf = c.spare[n-1][:0]
+		c.spare = c.spare[:n-1]
+	}
+	c.enqueue(seg{b: append(buf, b...), bid: -1, copied: true})
+}
+
+// writeNoCopy 把用户的 b 原样加入发送队列，内核用完后调用 release
+func (c *conn) writeNoCopy(b []byte, release func()) error {
+	if c.closed {
+		if release != nil {
+			release()
+		}
+		return errConnClosed
+	}
+	if len(b) == 0 {
+		if release != nil {
+			release()
+		}
+		return nil
+	}
+	c.enqueue(seg{b: b, bid: -1, release: release})
+	return nil
+}
+
+func (c *conn) enqueue(s seg) {
+	rn := c.rn
+	if !s.copied && rn.zcEnabled() && len(s.b) >= rn.ZeroCopyThreshold {
+		s.zc = &zcRef{bid: s.bid, release: s.release}
+	}
+	c.q = append(c.q, s)
+	if !c.sending {
+		c.off = 0
+		c.sendHead()
+	}
+}
+
+func (c *conn) sendHead() {
+	c.sending = true
+	s := &c.q[0]
+	rn := c.rn
+	if s.zc != nil && rn.zcEnabled() {
+		s.zc.n++
+		h := c.zcHandler(s.zc)
+		if s.bid >= 0 && rn.fixedIdx >= 0 {
+			rn.loop.SendZCFixed(c.fd, s.b[c.off:], uint16(rn.fixedIdx), unix.MSG_NOSIGNAL, 0, h)
+		} else {
+			rn.loop.SendZC(c.fd, s.b[c.off:], unix.MSG_NOSIGNAL, 0, h)
+		}
+		rn.zcSends++
+		return
+	}
+	rn.loop.Send(c.fd, s.b[c.off:], unix.MSG_NOSIGNAL, c.onSendH)
+}
+
+// zcHandler 处理 SEND_ZC 的结果 CQE 与通知 CQE
+func (c *conn) zcHandler(ref *zcRef) iouring.Handler {
+	return func(res int32, flags uint32) {
+		if flags&iouring_syscall.IORING_CQE_F_NOTIF != 0 {
+			ref.n--
+			c.rn.maybeReleaseZC(ref)
+			return
+		}
+		if flags&iouring_syscall.IORING_CQE_F_MORE == 0 {
+			ref.n-- // 不会有通知 CQE
+		}
+		if res == -int32(syscall.EOPNOTSUPP) || res == -int32(syscall.EINVAL) || res == -int32(syscall.ENOMEM) {
+			// 内核或 socket 不支持零拷贝（EOPNOTSUPP/EINVAL），或 pin 页超出 RLIMIT_MEMLOCK（ENOMEM）：
+			// 这些条件不会很快改变，关闭本实例的零拷贝，用普通 send 重发
+			c.rn.zcOff = true
+			c.sending = false
+			if !c.closed {
+				c.sendHead()
+				return
+			}
+		}
+		c.onSend(res, flags)
+	}
+}
+
+func (c *conn) onSend(res int32, flags uint32) {
+	if res <= 0 || c.closed {
+		// 出错（含 shutdown 后的 -EPIPE / -ECANCELED）
+		c.sending = false
+		c.close()
+		return
+	}
+	c.off += int(res)
+	if c.off < len(c.q[0].b) {
+		c.sendHead() // 短写：续写剩余部分
+		return
+	}
+	c.popHead()
+	c.off = 0
+	if len(c.q) > 0 {
+		c.sendHead()
+		return
+	}
+	c.sending = false
+
+	if c.rn.Handler.OnWritten(c.ud) == Close {
+		c.close()
+		return
+	}
+	if c.closeAfter {
+		c.close()
+	}
+}
+
+// popHead 移除已发送完的队首段并释放其内存
+func (c *conn) popHead() {
+	s := c.q[0]
+	c.q[0] = seg{}
+	c.q = c.q[1:]
+	if len(c.q) == 0 {
+		c.q = c.q[:0:0]
+	}
+	c.finish(s)
+}
+
+// finish 释放一段数据；零拷贝段要等所有通知 CQE 到达
+func (c *conn) finish(s seg) {
+	switch {
+	case s.zc != nil:
+		s.zc.done = true
+		c.rn.maybeReleaseZC(s.zc)
+	case s.copied:
+		if len(c.spare) < 2 && cap(s.b) <= 1<<20 {
+			c.spare = append(c.spare, s.b[:0])
+		}
+	default:
+		c.rn.releaseBuf(s.bid, s.release)
+	}
+}
+
+// close 关闭连接：shutdown 让在途请求尽快结束，fd 在 maybeFree 中关闭。
+// 可重复调用：已关闭时仍会尝试释放（在途请求结束的路径会再次调用它）。
+func (c *conn) close() {
+	if !c.closed {
+		c.closed = true
+		unix.Shutdown(c.fd, unix.SHUT_RDWR)
+	}
+	c.maybeFree()
+}
+
+func (c *conn) maybeFree() {
+	if c.recvActive || c.sending {
+		return
+	}
+	c.free()
+}
+
+// free 释放连接；正常路径只在没有在途 recv/send 时调用，Shutdown 时强制调用。
+// 零拷贝段的内存仍会等通知 CQE 到达后释放（通知不依赖 fd）。
+func (c *conn) free() {
+	if c.freed {
+		return
+	}
+	c.freed = true
+	c.closed = true
+	delete(c.rn.conns, c.fd)
+	c.rn.connCount.Add(-1)
+	unix.Close(c.fd)
+	c.rn.Handler.OnClose(c.ud)
+	if !c.sending {
+		for len(c.q) > 0 {
+			c.popHead()
+		}
+	}
+	c.spare = nil
+}
+
+// ---- URingNet 侧的缓冲区管理（Loop 线程）----
+
+func (rn *URingNet) zcEnabled() bool { return rn.ZeroCopyThreshold > 0 && !rn.zcOff }
+
+func (rn *URingNet) maybeReleaseZC(ref *zcRef) {
+	if ref.done && ref.n == 0 {
+		rn.releaseBuf(ref.bid, ref.release)
+		ref.bid, ref.release = -1, nil
+	}
+}
+
+// releaseBuf 归还被发送占用的接收缓冲区，或通知用户缓冲区可复用
+func (rn *URingNet) releaseBuf(bid int32, release func()) {
+	if bid >= 0 {
+		rn.br.Recycle(uint16(bid))
+		rn.held--
+		rn.rearmStarved()
+	}
+	if release != nil {
+		release()
+	}
+}
+
+// rearmStarved 有缓冲区归还时，为因 -ENOBUFS 停止接收的连接重新提交 recv
+func (rn *URingNet) rearmStarved() {
+	if len(rn.starved) == 0 {
+		return
+	}
+	for i, c := range rn.starved {
+		rn.starved[i] = nil
+		if !c.closed && !c.recvActive {
+			c.armRecv()
+		}
+	}
+	rn.starved = rn.starved[:0]
+}
+
+func sliceStart(b []byte) uintptr {
+	return uintptr(unsafe.Pointer(unsafe.SliceData(b[:1])))
+}
+
+// overlaps 判断 a 与 b 的底层数组（按容量计算）是否有重叠
+func overlaps(a, b []byte) bool {
+	if cap(a) == 0 || cap(b) == 0 {
+		return false
+	}
+	a0, b0 := sliceStart(a), sliceStart(b)
+	return a0 < b0+uintptr(cap(b)) && b0 < a0+uintptr(cap(a))
+}
+
+// within 判断 a 的数据是否完全位于 b 的底层数组（按容量计算）内
+func within(a, b []byte) bool {
+	if len(a) == 0 || cap(b) == 0 {
+		return false
+	}
+	a0, b0 := sliceStart(a), sliceStart(b)
+	return a0 >= b0 && a0+uintptr(len(a)) <= b0+uintptr(cap(b))
 }

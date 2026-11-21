@@ -21,7 +21,9 @@ In most cases, you could just use more mature network frameworks, for example, G
 
 ## Get Started
 
-UringNet extensively references existing network frameworks such as gnet and Netty, with some usage patterns closely resembling those of gnet. Please note that UringNet is based on io_uring and, therefore, requires running on the Linux operating system with a kernel version higher than or equal to 5.1.
+UringNet extensively references existing network frameworks such as gnet and Netty, with some usage patterns closely resembling those of gnet. Please note that UringNet is based on io_uring and, therefore, requires running on the Linux operating system with a kernel version **6.0 or later** (multishot recv / provided buffer ring; 6.1+ additionally enables `SINGLE_ISSUER | DEFER_TASKRUN`).
+
+Since this version the event loop is built on the `Loop` API of [iouring-go](https://github.com/y001j/iouring-go): one io_uring and one locked OS thread per ring, multishot accept/recv, a provided buffer ring, and a single `io_uring_enter` per loop iteration.
 
 ### Install UringNet:
 
@@ -35,62 +37,103 @@ go get -u github.com/y001j/uringnet
 package main
 
 import (
+	"os"
+	"os/signal"
+	"runtime"
+	"syscall"
+
 	"github.com/y001j/uringnet"
 	socket "github.com/y001j/uringnet/sockets"
-	"os"
-	"sync"
 )
 
-type testServer struct {
-	UringNet.BuiltinEventEngine
-
-	testloop *UringNet.Ringloop
-	//ring      *uring_net.URingNet
-	addr      string
-	multicore bool
+type echoServer struct {
+	uringnet.BuiltinEventEngine
 }
 
-// OnTraffic 
-//  
-//	@Description: OnTraffic is a hook function that runs every read event completed
-//	@receiver ts
-//	@param data
-//	@return uring_net.Action
-func (ts *testServer) OnTraffic(data *UringNet.UserData, ringnet *UringNet.URingNet) UringNet.Action {
+// OnTraffic runs on the ring's event-loop thread every time data arrives.
+// data.Buffer is only valid during the callback; WriteBuf is copied (or sent
+// zero-copy when it points into data.Buffer).
+func (es *echoServer) OnTraffic(data *uringnet.UserData, ringnet *uringnet.URingNet) uringnet.Action {
 	data.WriteBuf = data.Buffer
-	return UringNet.Echo
-}
-
-func (ts *testServer) OnWritten(data UringNet.UserData) UringNet.Action {
-	return UringNet.None
-}
-
-func (ts *testServer) OnOpen(data *UringNet.UserData) ([]byte, UringNet.Action) {
-
-	return nil, UringNet.None
+	return uringnet.Echo
 }
 
 func main() {
-	addr := os.Args[1]
-
-
 	options := socket.SocketOptions{TCPNoDelay: socket.TCPNoDelay, ReusePort: true}
-	ringNets, _ := UringNet.NewMany(UringNet.NetAddress{socket.Tcp4, addr}, 3200, true, 8, options, &testServer{}) //runtime.NumCPU()
-
-	loop := UringNet.SetLoops(ringNets, 3000)
-	var waitgroup sync.WaitGroup
-	waitgroup.Add(1)
+	ringNets, err := uringnet.NewMany(uringnet.NetAddress{AddrType: socket.Tcp4, Address: os.Args[1]},
+		4096, false, runtime.NumCPU(), options, &echoServer{})
+	if err != nil {
+		panic(err)
+	}
+	loop, err := uringnet.SetLoops(ringNets, 256) // 256 receive buffers per ring
+	if err != nil {
+		panic(err)
+	}
 	loop.RunMany()
-	waitgroup.Wait()
-}
 
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	go func() { <-sig; loop.Shutdown() }()
+	loop.Wait()
+}
 ```
 
 ### Important APIs
 
-```go
-UringNet.NewMany(UringNet.NetAddress{socket.Tcp4, addr}, 3200, true, 8, options, &testServer{})
+| API | Description |
+|---|---|
+| `NewMany(addr, size, sqpoll, num, options, handler)` | create `num` rings; with `ReusePort` each ring gets its own listening socket. `sqpoll` is deprecated and ignored. Only stream protocols (tcp/tcp4/tcp6/unix) are supported. |
+| `URingNet.BufferSize` | size of one receive buffer, set before `SetLoops` (default 16KB) |
+| `URingNet.SpinTime` | busy-poll before blocking (e.g. `50*time.Microsecond`): lower latency at the cost of CPU |
+| `URingNet.ZeroCopyThreshold` | enable zero-copy send (`IORING_OP_SEND_ZC`) for writes of at least this many bytes; 0 disables |
+| `SetLoops(rings, bufferCount)` | create the event loops; `bufferCount` is rounded up to a power of 2 (max 32768). The ring is FIFO, so more buffers means colder caches: use as few as the load needs (256 is a good start) |
+| `UserData.WriteNoCopy(b, release)` | queue `b` without copying; `release` is called once the kernel no longer uses it |
+| `Ringloop.RunMany()` / `Wait()` / `Shutdown()` | start accepting / block until shut down / close all connections and loops |
+| `URingNet.Post(fn)` | run `fn` on the ring's event-loop thread (from any goroutine) |
+
+Callback semantics:
+
+- All callbacks except `OnTick` run on the ring's event-loop thread and must not block.
+- `UserData` is per connection and lives for the whole connection; use `UserData.Context` for per-connection state.
+- Actions: `Echo`/`Write` send `WriteBuf`; `EchoAndClose` sends then closes; `Close` closes; `Shutdown` shuts down the engine; `None`/`Read` do nothing (receiving is always active).
+- Writes on one connection are ordered; writes issued while a send is in flight are coalesced; short writes are handled.
+- `OnClose` is called exactly once per connection, including peer close, errors and `Shutdown`.
+
+### Zero-copy send
+
+With `ZeroCopyThreshold > 0` the receive buffer ring is also registered as an io_uring *fixed buffer*
+(`IORING_REGISTER_BUFFERS`). That one memory region is shared by user space and the kernel:
+
 ```
+          kernel receives into it            kernel transmits from it
+ NIC/TCP ───────────────────────►  buffer ring (pinned, mapped once)  ───────────────────► NIC/TCP
+          (provided buffers)          ▲ OnTraffic sees data.Buffer       (SEND_ZC + FIXED_BUF)
+                                      │ in place, no copy
+```
+
+- Echo/forwarding (`data.WriteBuf = data.Buffer`): the data is sent from the receive buffer itself with
+  `SendZCFixed`; the buffer goes back to the ring only after the kernel's notification CQE (`IORING_CQE_F_NOTIF`).
+- Large responses you own (cached files, pre-built payloads): `data.WriteNoCopy(b, release)` sends `b` with `SEND_ZC`
+  without copying it into the socket buffer.
+- What stays: the receive side still copies from the socket into the buffer ring. Removing that needs io_uring
+  zero-copy receive (zcrx, `IORING_OP_RECV_ZC`, Linux 6.15+), which requires NIC support (header split, flow steering,
+  a dedicated RX queue) and is not implemented.
+- Caveats: it only pays off above roughly 10KB per send; **traffic to a local socket (loopback, containers on the same host)
+  is always copied by the kernel**, so it is slower there; pinned pages count against `RLIMIT_MEMLOCK`. If registration
+  fails, uringnet falls back to plain `SEND_ZC`. If `SEND_ZC` fails with `ENOMEM`/`EOPNOTSUPP`, it falls back to normal sends.
+
+### Benchmarks
+
+`bench/` has an echo benchmark comparing Go `net`, hand-written epoll, gnet, raw iouring-go and uringnet, runnable in Docker:
+see [bench/README.md](bench/README.md).
+
+### Testing on macOS
+
+```shell
+docker run --rm --security-opt seccomp=unconfined -v "$PWD":/src -w /src golang:1.22 go test -race .
+```
+
+`seccomp=unconfined` is required because Docker's default seccomp profile blocks io_uring.
 
 ## Benchmark
 
