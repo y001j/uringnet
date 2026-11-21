@@ -62,6 +62,7 @@ type URingNet struct {
 	// 以下字段仅在 Loop 线程中访问
 	conns    map[int]*conn
 	held     int     // 被发送队列占用的接收缓冲区数量
+	maxHeld  int     // 原地发送最多占用的接收缓冲区数量（缓冲区总数的一半）
 	starved  []*conn // 因缓冲区耗尽（-ENOBUFS）而暂停接收的连接
 	stopping bool
 	fixedIdx int  // 接收缓冲区的固定缓冲区下标，-1 表示未注册
@@ -249,6 +250,7 @@ func (rn *URingNet) start(bufferCount int) error {
 	}
 	rn.loop = l
 	rn.br = l.BufferRing(0)
+	rn.maxHeld = bufferCount / 2
 	rn.fixedIdx = rn.br.FixedIndex()
 	rn.conns = make(map[int]*conn)
 	return nil

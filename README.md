@@ -86,7 +86,7 @@ func main() {
 | `URingNet.BufferSize` | size of one receive buffer, set before `SetLoops` (default 16KB) |
 | `URingNet.SpinTime` | busy-poll before blocking (e.g. `50*time.Microsecond`): lower latency at the cost of CPU |
 | `URingNet.ZeroCopyThreshold` | enable zero-copy send (`IORING_OP_SEND_ZC`) for writes of at least this many bytes; 0 disables |
-| `SetLoops(rings, bufferCount)` | create the event loops; `bufferCount` is rounded up to a power of 2 (max 32768). The ring is FIFO, so more buffers means colder caches: use as few as the load needs (256 is a good start) |
+| `SetLoops(rings, bufferCount)` | create the event loops; `bufferCount` (receive buffers per ring) is rounded up to a power of 2 (max 32768). See *Sizing receive buffers* below |
 | `UserData.WriteNoCopy(b, release)` | queue `b` without copying; `release` is called once the kernel no longer uses it |
 | `Ringloop.RunMany()` / `Wait()` / `Shutdown()` | start accepting / block until shut down / close all connections and loops |
 | `URingNet.Post(fn)` | run `fn` on the ring's event-loop thread (from any goroutine) |
@@ -98,6 +98,18 @@ Callback semantics:
 - Actions: `Echo`/`Write` send `WriteBuf`; `EchoAndClose` sends then closes; `Close` closes; `Shutdown` shuts down the engine; `None`/`Read` do nothing (receiving is always active).
 - Writes on one connection are ordered; writes issued while a send is in flight are coalesced; short writes are handled.
 - `OnClose` is called exactly once per connection, including peer close, errors and `Shutdown`.
+
+### Sizing receive buffers
+
+Each ring receives into a pool of `bufferCount` buffers of `BufferSize` bytes (a provided buffer ring).
+
+- **Not fewer than the connections that are active at the same time on one ring.** When the pool runs dry, the kernel ends
+  the connection's multishot recv with `-ENOBUFS` and it has to be re-armed, which costs far more than a copy.
+- **Otherwise as few as possible.** The kernel uses the buffers in FIFO order, so the whole pool is the working set.
+  A smaller pool keeps the memory the kernel copies into warm in the CPU cache. In the benchmark, 16KB messages with
+  8 requests in flight per connection ran about 1.5x faster with 64 buffers than with 1024.
+- `256` (the examples' value) is a reasonable default. Use more for many busy connections per ring, fewer for a few
+  connections with bulk transfers.
 
 ### Zero-copy send
 

@@ -14,7 +14,6 @@ import (
 	"testing"
 	"time"
 
-
 	socket "github.com/y001j/uringnet/sockets"
 )
 
@@ -507,4 +506,3 @@ func BenchmarkEcho(b *testing.B) {
 		}
 	}
 }
-

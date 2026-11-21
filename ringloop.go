@@ -29,6 +29,8 @@ type Ringloop struct {
 //
 //	@param bufferCount 每个实例的接收缓冲区数量，会向上取整为 2 的幂（最大 32768）；
 //	                   单个缓冲区大小由 URingNet.BufferSize 决定。
+//	                   数量应不少于每个实例上同时活跃的连接数（否则频繁 -ENOBUFS），
+//	                   在此前提下越少越好：内核按 FIFO 轮流使用，缓冲区越少拷贝时缓存越热。
 func SetLoops(urings []*URingNet, bufferCount int) (*Ringloop, error) {
 	size := len(urings)
 	if size == 0 {

@@ -143,12 +143,14 @@ func (c *conn) handleAction(action Action, recvBuf []byte, bid int32) (held bool
 	return held
 }
 
-// writeFrom 发送 b：队列为空且 b 位于本次接收缓冲区时原地发送（返回 true），否则拷贝
+// writeFrom 发送 b：队列为空且 b 位于本次接收缓冲区时原地发送（返回 true），否则拷贝。
+// 原地发送会占用接收缓冲区直到发送完成；被占用的缓冲区超过 maxHeld 时改为拷贝，
+// 避免缓冲区耗尽：耗尽时 multishot recv 以 -ENOBUFS 终止，重新提交的开销远大于一次拷贝。
 func (c *conn) writeFrom(b, recvBuf []byte, bid int32) bool {
 	if len(b) == 0 || c.closed {
 		return false
 	}
-	if bid >= 0 && len(c.q) == 0 && within(b, recvBuf) {
+	if bid >= 0 && len(c.q) == 0 && c.rn.held < c.rn.maxHeld && within(b, recvBuf) {
 		c.rn.held++
 		c.enqueue(seg{b: b, bid: bid, release: nil})
 		return true
@@ -358,25 +360,33 @@ func (rn *URingNet) releaseBuf(bid int32, release func()) {
 	if bid >= 0 {
 		rn.br.Recycle(uint16(bid))
 		rn.held--
-		rn.rearmStarved()
+		rn.rearmStarved(rn.held == 0)
 	}
 	if release != nil {
 		release()
 	}
 }
 
-// rearmStarved 有缓冲区归还时，为因 -ENOBUFS 停止接收的连接重新提交 recv
-func (rn *URingNet) rearmStarved() {
-	if len(rn.starved) == 0 {
-		return
-	}
-	for i, c := range rn.starved {
-		rn.starved[i] = nil
-		if !c.closed && !c.recvActive {
-			c.armRecv()
+// rearmStarved 有缓冲区归还时，为因 -ENOBUFS 停止接收的连接重新提交 recv。
+// 每归还一个缓冲区只唤醒一个连接（先进先出）：一次全部唤醒时只有少数能拿到缓冲区，
+// 其余会立刻再次 -ENOBUFS（惊群）。all 为 true（已没有被占用的缓冲区）时唤醒全部，
+// 否则剩下的连接可能再也等不到归还。
+func (rn *URingNet) rearmStarved(all bool) {
+	for len(rn.starved) > 0 {
+		c := rn.starved[0]
+		rn.starved[0] = nil
+		rn.starved = rn.starved[1:]
+		if c.closed || c.recvActive {
+			continue
+		}
+		c.armRecv()
+		if !all {
+			break
 		}
 	}
-	rn.starved = rn.starved[:0]
+	if len(rn.starved) == 0 {
+		rn.starved = nil
+	}
 }
 
 func sliceStart(b []byte) uintptr {
