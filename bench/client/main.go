@@ -1,5 +1,5 @@
-// echo 压测客户端：c 个长连接，每个连接循环「写 p 个 s 字节的请求 → 读回全部响应」。
-// 输出 QPS、客户端 CPU 占用，以及按 1/16 采样的往返延迟 p50/p99。
+// Echo benchmark client: c persistent connections, each looping "write p requests of s bytes, read all responses back".
+// Prints QPS, client CPU, and p50/p99 round-trip latency sampled 1 in 16.
 package main
 
 import (

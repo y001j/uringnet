@@ -5,6 +5,7 @@ package uringnet
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"log/slog"
 	"net"
@@ -36,8 +37,8 @@ type Server struct {
 	stopOnce sync.Once
 }
 
-// defaultSQSize 是 Listen 的默认 SQ 大小。实测（单核服务端，512 连接管道化）SQ 从 4096 降到 256
-// 吞吐没有变化，而 SQ 4096 时每个 ring 锁定约 550KB 内存，常见的 8MB RLIMIT_MEMLOCK 下只能建 15 个 ring。
+// defaultSQSize is Listen's default SQ size. Measured (server on 1 core, 512 connections pipelined), SQ 4096 down to 256 made no
+// throughput difference, while at 4096 each ring locks about 550KB, so the common 8MB RLIMIT_MEMLOCK allowed only 15 rings.
 const defaultSQSize = 512
 
 // Option configures a Server; see the With* functions.
@@ -61,6 +62,9 @@ type options struct {
 	reusePort      bool
 	noDelay        bool
 	logger         *slog.Logger
+	backend        Backend
+	tlsConfig      *tls.Config
+	dialTLSConfig  *tls.Config
 }
 
 // WithRings sets the number of event loops (default runtime.NumCPU()). Each has its own
@@ -127,6 +131,21 @@ func WithReusePort(on bool) Option { return func(o *options) { o.reusePort = on 
 // WithTCPNoDelay sets TCP_NODELAY on accepted connections (default true).
 func WithTCPNoDelay(on bool) Option { return func(o *options) { o.noDelay = on } }
 
+// WithTLS makes accepted connections speak TLS with cfg (which needs certificates). OnOpen runs once
+// the handshake has succeeded; connections whose handshake fails are closed without OnOpen or OnClose
+// and counted in Stats.TLSHandshakeErrors. Each TLS connection runs crypto/tls on a goroutine of its
+// own, so TLS costs a goroutine switch per record and disables in-place and zero-copy sends.
+func WithTLS(cfg *tls.Config) Option { return func(o *options) { o.tlsConfig = cfg } }
+
+// WithDialTLS makes dialed connections (Dial, DialAsync) speak TLS as a client with cfg. Without a
+// ServerName in cfg, the host being dialed is used to verify the certificate. Dial returns once the
+// handshake has succeeded, or its error.
+func WithDialTLS(cfg *tls.Config) Option { return func(o *options) { o.dialTLSConfig = cfg } }
+
+// WithBackend selects the event loop implementation (default BackendAuto: io_uring, or
+// epoll when io_uring is unavailable).
+func WithBackend(b Backend) Option { return func(o *options) { o.backend = b } }
+
 // WithLogger receives warnings about failures the server recovers from (accept errors,
 // zero-copy fallback) and debug messages (timeouts). By default nothing is logged.
 func WithLogger(l *slog.Logger) Option { return func(o *options) { o.logger = l } }
@@ -140,7 +159,7 @@ func Listen(network, address string, h Handler, opts ...Option) (*Server, error)
 	return newServer(network, address, h, opts)
 }
 
-// newServer 创建 Server；network 为空时不监听（NewClient）
+// newServer creates a Server; with an empty network it does not listen (NewClient).
 func newServer(network, address string, h Handler, opts []Option) (*Server, error) {
 	if h == nil {
 		return nil, fmt.Errorf("uringnet: nil Handler")
@@ -150,10 +169,7 @@ func newServer(network, address string, h Handler, opts []Option) (*Server, erro
 	for _, opt := range opts {
 		opt(&o)
 	}
-	if err := checkKernel(); err != nil {
-		return nil, err
-	}
-	// Unix socket 不支持 SO_REUSEPORT（所有 ring 共享一个监听 socket）
+	// Unix sockets do not support SO_REUSEPORT (all rings share one listening socket)
 	sockOpts := socket.SocketOptions{ReusePort: o.reusePort && network != "unix"}
 	if o.noDelay {
 		sockOpts.TCPNoDelay = socket.TCPNoDelay
@@ -195,6 +211,9 @@ func newServer(network, address string, h Handler, opts []Option) (*Server, erro
 		rn.WriteTimeout = o.writeTimeout
 		rn.Logger = s.log
 		rn.noDelay = o.noDelay
+		rn.Backend = o.backend
+		rn.tlsServer = o.tlsConfig
+		rn.tlsClient = o.dialTLSConfig
 	}
 	if rings[0].SocketFd >= 0 {
 		if sa, err := unix.Getsockname(rings[0].SocketFd); err == nil {
@@ -219,6 +238,9 @@ func closeListeners(rings []*URingNet) {
 		}
 	}
 }
+
+// Backend returns the backend the event loops use: BackendIOUring or BackendEpoll.
+func (s *Server) Backend() Backend { return s.rings[0].backend }
 
 // Addr returns the listening address (with the actual port when listening on port 0).
 func (s *Server) Addr() net.Addr { return s.addr }
@@ -279,7 +301,7 @@ func (s *Server) Close() error {
 	s.stopOnce.Do(func() {
 		s.closed.Store(true)
 		if !s.served.Load() {
-			// 没有 Serve 过：Serve 中 Wait 不会被调用，这里直接关闭
+			// Never served: Serve will not call Wait, so close directly here
 			s.served.Store(true)
 		}
 		s.loop.Shutdown()

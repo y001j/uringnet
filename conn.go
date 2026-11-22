@@ -4,6 +4,7 @@
 package uringnet
 
 import (
+	"crypto/tls"
 	stderrors "errors"
 	"net"
 
@@ -23,7 +24,7 @@ var (
 	ErrWriteTimeout = stderrors.New("uringnet: write timeout")
 )
 
-// errConnClosed 保留旧名字，供内部使用
+// errConnClosed is the old internal name.
 var errConnClosed = ErrConnClosed
 
 // Handler receives the events of a Server. All methods run on the event loop thread
@@ -68,7 +69,7 @@ func (BuiltinHandler) OnShutdown(*Server)             {}
 type Conn struct {
 	c       *conn
 	ctx     interface{}
-	pending []byte // Framed：尚不完整的帧
+	pending []byte // Framed: incomplete frame
 }
 
 // Write queues b for sending and returns len(b). Data is sent in order. Unless b lies
@@ -105,7 +106,7 @@ func (cn *Conn) Close() error {
 	if c.closed {
 		return ErrConnClosed
 	}
-	c.closeAfterFlush()
+	c.closeGracefully()
 	return nil
 }
 
@@ -130,6 +131,15 @@ func (cn *Conn) AsyncWrite(b []byte, done func(error)) error {
 // from any goroutine.
 func (cn *Conn) AsyncClose() error {
 	return cn.c.rn.Post(func() { cn.Close() })
+}
+
+// TLSConnectionState returns the TLS state of a TLS connection (WithTLS, WithDialTLS); ok is false
+// for plain connections.
+func (cn *Conn) TLSConnectionState() (state tls.ConnectionState, ok bool) {
+	if cn.c.tls == nil || !cn.c.tls.ready {
+		return tls.ConnectionState{}, false
+	}
+	return cn.c.tls.tc.ConnectionState(), true
 }
 
 // Context returns the value set with SetContext.
@@ -162,7 +172,7 @@ func (cn *Conn) LocalAddr() net.Addr {
 	return sockaddrToNetAddr(sa)
 }
 
-// apiHandler 把新 API 的 Handler 接到连接状态机上。OnBoot/OnShutdown 由 Server 调用一次。
+// apiHandler connects a Handler to the connection state machine. OnBoot/OnShutdown are called once by the Server.
 type apiHandler struct {
 	h Handler
 	s *Server
@@ -179,11 +189,11 @@ func (a apiHandler) written(*conn) {}
 
 func (a apiHandler) closed(c *conn) { a.h.OnClose(&c.api, c.err) }
 
-// apiAction 处理新 API 回调返回的动作。数据通过 Conn.Write 发送，写数据的旧动作在这里等同于 None。
+// apiAction handles the action returned by a Handler callback. Data is sent with Conn.Write; the old write actions count as None here.
 func (c *conn) apiAction(action Action, s *Server) {
 	switch action {
 	case Close, EchoAndClose:
-		c.closeAfterFlush()
+		c.closeGracefully()
 	case Shutdown:
 		go s.Close()
 	}

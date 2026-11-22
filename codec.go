@@ -77,10 +77,10 @@ func (fh framed) OnTraffic(c *Conn, data []byte) Action {
 		action = fh.h.OnMessage(c, buf[:n])
 		buf = buf[n:]
 	}
-	// 保留不完整的帧：buf 是 pending 的后缀时原地前移，否则（位于接收缓冲区）拷贝出来
+	// Keep the incomplete frame: moved forward when buf is a suffix of pending, copied out when it lies in the receive buffer
 	c.pending = append(c.pending[:0], buf...)
 	if len(c.pending) == 0 && cap(c.pending) > 64<<10 {
-		c.pending = nil // 偶尔的大帧之后不长期占着内存
+		c.pending = nil // do not hold on to the memory of an occasional large frame
 	}
 	return action
 }

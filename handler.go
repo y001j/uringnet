@@ -3,10 +3,10 @@
 
 package uringnet
 
-// connHandler 是连接状态机调用回调的内部接口。旧 API（EventHandler + UserData）和新 API
-// （Handler + Conn）各有一个实现，共用同一套连接状态机。所有方法都在 Loop 线程中调用。
+// connHandler is the internal interface the connection state machine calls back through. The deprecated
+// API (EventHandler + UserData) and the Handler API (Handler + Conn) each implement it over the same state machine. All methods run on the loop thread.
 //
-// open 与 traffic 在 c.batching 期间调用：其间写入的数据在回调返回后一起发送。
+// open and traffic run while c.batching is set: data written during them is sent together after they return.
 type connHandler interface {
 	boot(rn *URingNet)
 	open(c *conn)
@@ -16,7 +16,7 @@ type connHandler interface {
 	shutdown(rn *URingNet)
 }
 
-// legacyHandler 把旧的 EventHandler 接到连接状态机上
+// legacyHandler connects the deprecated EventHandler to the connection state machine.
 type legacyHandler struct {
 	h EventHandler
 }
@@ -50,7 +50,7 @@ func (l legacyHandler) closed(c *conn) { l.h.OnClose(c.ud) }
 
 func (l legacyHandler) shutdown(rn *URingNet) { l.h.OnShutdown(rn) }
 
-// legacyAction 处理旧 API 回调返回的动作：发送 UserData.WriteBuf 等
+// legacyAction handles the action returned by a deprecated callback: sends UserData.WriteBuf and so on.
 func (c *conn) legacyAction(action Action) {
 	switch action {
 	case Echo, Write:
@@ -65,9 +65,9 @@ func (c *conn) legacyAction(action Action) {
 			go rl.Shutdown()
 		}
 	}
-	// 重置 WriteBuf 以便用户复用其底层数组（如 append 构造响应）；
-	// 但如果它指向接收缓冲区（data.WriteBuf = data.Buffer），必须丢弃，
-	// 否则用户下次 append 会写进已归还给内核的缓冲区。
+	// Reset WriteBuf so its backing array can be reused (e.g. appending a response); but if it points
+	// into the receive buffer (data.WriteBuf = data.Buffer) it must be dropped, or the next append
+	// would write into a buffer that belongs to the kernel again.
 	if overlaps(c.ud.WriteBuf, c.curBuf) {
 		c.ud.WriteBuf = nil
 	} else {

@@ -17,7 +17,7 @@ import (
 	"time"
 )
 
-// splitEcho 把收到的数据分成至多三段写回：覆盖同一接收缓冲区的多段原地发送，以及排队后转为拷贝的路径
+// splitEcho writes each chunk back in up to three slices: several in-place sends from one receive buffer, and the queued-then-copied path.
 type splitEcho struct {
 	BuiltinHandler
 	opened, closed atomic.Int64
@@ -44,15 +44,15 @@ var (
 	fuzzAddrs []string
 )
 
-// fuzzServers 启动几种配置的服务端，在整个测试进程中复用
+// fuzzServers starts servers with several configurations, shared by the whole test process.
 func fuzzServers(t testing.TB) []string {
 	fuzzOnce.Do(func() {
 		configs := [][]Option{
-			// 缓冲区很少很小：频繁 -ENOBUFS、暂停与恢复接收
+			// Few, small buffers: frequent -ENOBUFS, receive pauses and resumes
 			{WithRings(1), WithBuffers(8, 512), WithRecvBundle(BundleOff)},
-			// 增量缓冲区：同一缓冲区被多个连接、多段数据共用
+			// Incremental buffers: one buffer shared by several connections and slices
 			{WithRings(2), WithBuffers(4, 4096), WithIncrementalBuffers()},
-			// 零拷贝阈值很低：大部分原地发送走 SEND_ZC（本机回环上仍然正确，只是没有收益）
+			// Very low zero-copy threshold: most in-place sends use SEND_ZC (still correct on loopback, just no gain)
 			{WithRings(1), WithBuffers(16, 2048), WithZeroCopy(256)},
 		}
 		for _, opts := range configs {
@@ -70,9 +70,9 @@ func fuzzServers(t testing.TB) []string {
 	return fuzzAddrs
 }
 
-// FuzzEcho：任意数据、任意分包方式下，回显的字节流必须与发送的完全一致。
-// 运行：go test -run '^$' -fuzz FuzzEcho -fuzztime 5m -fuzzminimizetime 5s
-// （发现新输入时引擎默认会花最多 60s 最小化它，期间不计执行次数，看起来像卡住了）
+// FuzzEcho: for any data and any chunking, the echoed stream must equal what was sent.
+// Run: go test -run '^$' -fuzz FuzzEcho -fuzztime 5m -fuzzminimizetime 5s
+// (when it finds a new input the engine spends up to 60s minimizing it by default, without counting executions, which looks like a hang)
 func FuzzEcho(f *testing.F) {
 	f.Add([]byte("hello"), uint64(1), uint8(1))
 	f.Add(bytes.Repeat([]byte{0xab}, 5000), uint64(7), uint8(3))
@@ -106,7 +106,7 @@ func FuzzEcho(f *testing.F) {
 	})
 }
 
-// echoChunked 按 seed 决定的随机大小分块发送 data（块之间偶尔停顿），并校验读回的数据
+// echoChunked sends data in random chunk sizes chosen by seed (pausing now and then) and checks what comes back.
 func echoChunked(addr string, data []byte, seed uint64) error {
 	c, err := net.Dial("tcp4", addr)
 	if err != nil {
@@ -158,8 +158,8 @@ func openFds(t testing.TB) int {
 	return len(entries)
 }
 
-// TestStressChurn：大量连接反复建立和断开，混合正常收发、RST、半关闭、只发不读；
-// 结束后不能有 fd、连接或接收缓冲区泄漏。URINGNET_STRESS 可设置时长（如 60s），默认 2s。
+// TestStressChurn: many connections opened and closed over and over, mixing normal echo, RST, half-close and write-only sessions;
+// afterwards no fds, connections or receive buffers may have leaked. URINGNET_STRESS sets the duration (e.g. 60s), default 2s.
 func TestStressChurn(t *testing.T) {
 	if testing.Short() {
 		t.Skip("stress test")
@@ -212,7 +212,7 @@ func TestStressChurn(t *testing.T) {
 			}
 			wg.Wait()
 
-			// 所有客户端都已关闭：服务端连接应当全部释放，接收缓冲区全部归还
+			// All clients are gone: every server connection must be freed and every receive buffer returned
 			waitFor(t, func() bool { return s.Connections() == 0 }, "all connections closed")
 			for _, rn := range s.rings {
 				var held, pinned, starved int
@@ -231,14 +231,14 @@ func TestStressChurn(t *testing.T) {
 				t.Fatal(err)
 			}
 			<-served
-			// ring 的释放是异步的，fd 稍后才会全部关闭
+			// Rings are released asynchronously, so the fds close a little later
 			waitFor(t, func() bool { return openFds(t) <= fdsBefore }, "fds released")
 			t.Logf("%d client sessions, %d connections", ok.Load(), h.opened.Load())
 		})
 	}
 }
 
-// churnOnce 建立一个连接并随机执行一种场景
+// churnOnce opens one connection and runs a random scenario.
 func churnOnce(addr string, rng *mrand.Rand) error {
 	c, err := net.Dial("tcp4", addr)
 	if err != nil {
@@ -250,7 +250,7 @@ func churnOnce(addr string, rng *mrand.Rand) error {
 	msg := make([]byte, 1+rng.Intn(32<<10))
 	rng.Read(msg)
 	switch rng.Intn(4) {
-	case 0: // 正常收发并校验
+	case 0: // echo and check
 		go tc.Write(msg)
 		got := make([]byte, len(msg))
 		if _, err := io.ReadFull(tc, got); err != nil {
@@ -259,10 +259,10 @@ func churnOnce(addr string, rng *mrand.Rand) error {
 		if !bytes.Equal(got, msg) {
 			return fmt.Errorf("echo: data differs")
 		}
-	case 1: // 发完立即 RST
+	case 1: // send, then reset at once
 		tc.Write(msg)
 		tc.SetLinger(0)
-	case 2: // 半关闭，读回全部数据
+	case 2: // half-close, read everything back
 		go func() { tc.Write(msg); tc.CloseWrite() }()
 		got, err := io.ReadAll(tc)
 		if err != nil {
@@ -271,7 +271,7 @@ func churnOnce(addr string, rng *mrand.Rand) error {
 		if !bytes.Equal(got, msg) {
 			return fmt.Errorf("half-close: got %d bytes, want %d", len(got), len(msg))
 		}
-	case 3: // 只发不读，然后关闭
+	case 3: // write without reading, then close
 		for i := 0; i < 4; i++ {
 			tc.Write(msg)
 		}

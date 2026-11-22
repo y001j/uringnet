@@ -5,13 +5,13 @@ package uringnet
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"sync/atomic"
 	"syscall"
 	"unsafe"
 
-	iouring_syscall "github.com/y001j/iouring-go/syscall"
 	"golang.org/x/sys/unix"
 )
 
@@ -69,7 +69,7 @@ func (s *Server) Dial(ctx context.Context, network, address string, connCtx inte
 	}
 	rn := s.pickRing()
 	results := make(chan result, 1)
-	req := &dialReq{connCtx: connCtx, done: func(c *conn, err error) { results <- result{c, err} }}
+	req := &dialReq{connCtx: connCtx, host: hostOf(address), done: func(c *conn, err error) { results <- result{c, err} }}
 	if err := rn.Post(func() { rn.connect(sa, domain, req) }); err != nil {
 		return nil, ErrServerClosed
 	}
@@ -78,7 +78,7 @@ func (s *Server) Dial(ctx context.Context, network, address string, connCtx inte
 		return r.api(), r.err
 	case <-ctx.Done():
 	}
-	// 在 Loop 线程中放弃这次拨号：连接还没建立时取消请求，之后的结果会被丢弃（关闭 fd，不调用 OnOpen）
+	// Abandon the dial on the loop thread: cancel the request if the connection is not up yet; a later result is dropped (fd closed, no OnOpen)
 	abandoned := make(chan bool, 1)
 	if rn.Post(func() {
 		if req.finished {
@@ -86,7 +86,7 @@ func (s *Server) Dial(ctx context.Context, network, address string, connCtx inte
 			return
 		}
 		req.cancelled = true
-		rn.loop.Cancel(req.ud, rn.nopH)
+		rn.loop.Cancel(req.ud)
 		abandoned <- true
 	}) != nil {
 		return nil, ctx.Err()
@@ -94,7 +94,7 @@ func (s *Server) Dial(ctx context.Context, network, address string, connCtx inte
 	if <-abandoned {
 		return nil, ctx.Err()
 	}
-	r := <-results // 结果已经先一步到达
+	r := <-results // the result arrived first
 	return r.api(), r.err
 }
 
@@ -128,9 +128,9 @@ func (rn *URingNet) dialAsync(network, address string, connCtx interface{}, done
 			rn.Post(func() { finish(nil, err) })
 			return
 		}
-		req := &dialReq{connCtx: connCtx, done: finish}
+		req := &dialReq{connCtx: connCtx, host: hostOf(address), done: finish}
 		if rn.Post(func() { rn.connect(sa, domain, req) }) != nil && done != nil {
-			done(nil, ErrServerClosed) // 事件循环已经关闭，没有别的线程可用了
+			done(nil, ErrServerClosed) // the event loop is closed: there is no other thread to report on
 		}
 	}()
 	return nil
@@ -148,13 +148,14 @@ func (r result) api() *Conn {
 	return &r.c.api
 }
 
-// dialReq 是一次进行中的拨号，字段只在 Loop 线程中访问
+// dialReq is a dial in progress; its fields are accessed on the loop thread only.
 type dialReq struct {
 	connCtx   interface{}
 	done      func(*conn, error)
-	ud        uint64 // connect 请求的 user_data，用于取消
-	finished  bool   // connect 已完成
-	cancelled bool   // 调用方已放弃：结果丢弃
+	ud        uint64 // user_data of the connect request, to cancel it
+	finished  bool   // connect has completed
+	cancelled bool   // the caller gave up: drop the result
+	host      string // host part of the address, the TLS server name by default
 }
 
 var dialRing atomic.Uint32
@@ -163,7 +164,7 @@ func (s *Server) pickRing() *URingNet {
 	return s.rings[int(dialRing.Add(1))%len(s.rings)]
 }
 
-// connect 在 Loop 线程中发起 IORING_OP_CONNECT
+// connect starts a connect on the loop thread (IORING_OP_CONNECT, or non-blocking connect on epoll).
 func (rn *URingNet) connect(sa unix.Sockaddr, domain int, req *dialReq) {
 	if rn.stopping || rn.draining {
 		req.finished = true
@@ -186,10 +187,7 @@ func (rn *URingNet) connect(sa unix.Sockaddr, domain int, req *dialReq) {
 		req.done(nil, err)
 		return
 	}
-	req.ud = rn.loop.Prep(func(sqe *iouring_syscall.SubmissionQueueEntry) {
-		// connect：addr 为 sockaddr，off 为其长度
-		sqe.PrepOperation(iouring_syscall.IORING_OP_CONNECT, int32(fd), uint64(uintptr(unsafe.Pointer(&raw[0]))), 0, uint64(len(raw)))
-	}, raw, func(res int32, _ uint32) {
+	req.ud = rn.loop.Connect(fd, raw, func(res int32, _ uint32) {
 		req.finished = true
 		switch {
 		case req.cancelled:
@@ -202,13 +200,33 @@ func (rn *URingNet) connect(sa unix.Sockaddr, domain int, req *dialReq) {
 			req.done(nil, ErrServerClosed)
 		default:
 			rn.dialed++
-			c := rn.openConn(fd, req.connCtx)
-			req.done(c, nil) // OnOpen 可能已经关闭了连接；之后的写入会返回 ErrConnClosed
+			rn.openConn(fd, req.connCtx, rn.dialTLS(req.host), true, req.done)
 		}
 	})
 }
 
-// resolveDial 把地址解析为 sockaddr 和协议族
+// dialTLS returns the TLS config for a dialed connection, or nil without WithDialTLS. Without a
+// ServerName in the config, the host being dialed is used.
+func (rn *URingNet) dialTLS(host string) *tls.Config {
+	cfg := rn.tlsClient
+	if cfg == nil || cfg.ServerName != "" || cfg.InsecureSkipVerify || host == "" {
+		return cfg
+	}
+	cfg = cfg.Clone()
+	cfg.ServerName = host
+	return cfg
+}
+
+func hostOf(address string) string {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return ""
+	}
+	h, _, _ := cutZone(host)
+	return h
+}
+
+// resolveDial resolves an address to a sockaddr and address family.
 func resolveDial(ctx context.Context, network, address string) (unix.Sockaddr, int, error) {
 	switch network {
 	case "unix":
@@ -280,7 +298,7 @@ func cutZone(host string) (string, string, bool) {
 	return host, "", false
 }
 
-// rawSockaddr 把 sockaddr 编码为内核的 struct sockaddr_*（connect 需要指针和长度）
+// rawSockaddr encodes a sockaddr as the kernel's struct sockaddr_* (connect takes a pointer and length).
 func rawSockaddr(sa unix.Sockaddr) ([]byte, error) {
 	switch a := sa.(type) {
 	case *unix.SockaddrInet4:
@@ -305,18 +323,18 @@ func rawSockaddr(sa unix.Sockaddr) ([]byte, error) {
 		for i := 0; i < len(a.Name); i++ {
 			raw.Path[i] = int8(a.Name[i])
 		}
-		n := uintptr(2 + len(a.Name)) // sa_family + 路径
+		n := uintptr(2 + len(a.Name)) // sa_family + path
 		if len(a.Name) > 0 && a.Name[0] == '@' {
-			raw.Path[0] = 0 // 抽象命名空间：不含结尾的 0
+			raw.Path[0] = 0 // abstract namespace: no terminating NUL
 		} else {
-			n++ // 普通路径：包含结尾的 0
+			n++ // pathname: include the terminating NUL
 		}
 		return structBytes(unsafe.Pointer(&raw), n), nil
 	}
 	return nil, fmt.Errorf("uringnet: unsupported address %T", sa)
 }
 
-// putPort 以网络字节序写入端口
+// putPort stores port in network byte order.
 func putPort(p *uint16, port int) {
 	b := (*[2]byte)(unsafe.Pointer(p))
 	b[0], b[1] = byte(port>>8), byte(port)

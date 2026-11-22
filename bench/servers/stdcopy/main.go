@@ -5,7 +5,7 @@ import (
 	"os"
 )
 
-// 标准库 echo，显式 Read/Write（数据进出用户态），避免 io.Copy 走 splice
+// Standard library echo with explicit Read/Write (data passes through user space), so io.Copy cannot use splice.
 func main() {
 	l, err := net.Listen("tcp4", os.Args[1])
 	if err != nil {

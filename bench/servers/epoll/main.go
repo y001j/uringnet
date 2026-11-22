@@ -1,7 +1,7 @@
 //go:build linux
 
-// 手写 epoll echo（对照组）：每个 loop 一个锁定的 OS 线程 + 自己的 SO_REUSEPORT 监听 socket，
-// 非阻塞读写，水平触发；写不完时挂 EPOLLOUT。
+// Hand-written epoll echo (baseline): one locked OS thread and its own SO_REUSEPORT listening socket per loop,
+// non-blocking reads and writes, level-triggered; EPOLLOUT when a write is incomplete.
 package main
 
 import (
@@ -14,7 +14,7 @@ import (
 )
 
 type conn struct {
-	out []byte // 未写完的数据
+	out []byte // data not written yet
 }
 
 func listen(addr string) int {

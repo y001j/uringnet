@@ -11,26 +11,26 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// Ringloop 管理一组 URingNet 事件循环
+// Ringloop manages a set of URingNet event loops.
 //
 // Deprecated: use Server (Listen, Serve, Shutdown).
 type Ringloop struct {
-	RingNet   []*URingNet // 事件循环实例
-	RingCount int32       // 实例数量
+	RingNet   []*URingNet // the rings
+	RingCount int32       // number of rings
 
-	listenFds []int // 共享的监听 socket（由 Ringloop 负责关闭）
+	listenFds []int // shared listening sockets, closed by the Ringloop
 
 	stop         chan struct{}
 	shutdownOnce sync.Once
 	done         chan struct{}
 }
 
-// SetLoops 为每个 URingNet 创建事件循环（io_uring + provided buffer ring）。
+// SetLoops creates the event loop (io_uring and provided buffer ring, or epoll) of each URingNet.
 //
-//	@param bufferCount 每个实例的接收缓冲区数量，会向上取整为 2 的幂（最大 32768）；
-//	                   单个缓冲区大小由 URingNet.BufferSize 决定。
-//	                   数量应不少于每个实例上同时活跃的连接数（否则频繁 -ENOBUFS），
-//	                   在此前提下越少越好：内核按 FIFO 轮流使用，缓冲区越少拷贝时缓存越热。
+//	@param bufferCount receive buffers per ring, rounded up to a power of 2 (max 32768);
+//	                   the size of each is URingNet.BufferSize. Use at least as many as connections
+//	                   active at once on a ring (otherwise -ENOBUFS is frequent), otherwise as few as
+//	                   possible: the kernel uses them in FIFO order, so fewer stay warmer in the cache.
 //
 // Deprecated: use Listen with WithBuffers.
 func SetLoops(urings []*URingNet, bufferCount int) (*Ringloop, error) {
@@ -77,7 +77,7 @@ func roundPow2(n int) int {
 	return p
 }
 
-// RunMany 启动所有事件循环开始接受连接，立即返回；用 Wait 等待退出。
+// RunMany starts accepting connections on all rings and returns at once; Wait blocks until shutdown.
 func (loop *Ringloop) RunMany() {
 	for _, rn := range loop.RingNet {
 		rn := rn
@@ -88,13 +88,13 @@ func (loop *Ringloop) RunMany() {
 	loop.startTicker()
 }
 
-// RunMany2 与 RunMany 相同，保留以兼容旧接口
+// RunMany2 is the same as RunMany, kept for compatibility.
 func (loop *Ringloop) RunMany2() { loop.RunMany() }
 
-// Wait 阻塞直到 Shutdown 完成
+// Wait blocks until Shutdown has completed.
 func (loop *Ringloop) Wait() { <-loop.done }
 
-// Shutdown 关闭所有连接与事件循环，可在任意 goroutine 中调用（回调中请返回 Shutdown 动作）
+// Shutdown closes all connections and event loops. It may be called from any goroutine (return the Shutdown action from callbacks).
 func (loop *Ringloop) Shutdown() {
 	loop.shutdownOnce.Do(func() {
 		close(loop.stop)
@@ -114,10 +114,10 @@ func (loop *Ringloop) Shutdown() {
 	})
 }
 
-// startTicker 驱动 OnTick（使用第一个实例的 Handler），OnTick 在独立的 goroutine 中执行
+// startTicker drives OnTick (with the first ring's Handler); OnTick runs on its own goroutine.
 func (loop *Ringloop) startTicker() {
 	h := loop.RingNet[0].Handler
-	if h == nil { // 新 API 没有 OnTick
+	if h == nil { // the Handler API has no OnTick
 		return
 	}
 	delay, action := h.OnTick()

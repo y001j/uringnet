@@ -1,6 +1,6 @@
 //go:build linux
 
-// uringnet echo 服务（压测用），可通过参数调整缓冲区、轮询与零拷贝
+// uringnet echo server for benchmarks; flags tune buffers, polling, zero copy and the backend.
 package main
 
 import (
@@ -14,7 +14,7 @@ import (
 
 type echo struct{ uringnet.BuiltinHandler }
 
-// OnTraffic 原样写回：数据位于接收缓冲区中，原地发送
+// OnTraffic writes data back as is: it lies in the receive buffer, so it is sent in place.
 func (echo) OnTraffic(c *uringnet.Conn, data []byte) uringnet.Action {
 	c.Write(data)
 	return uringnet.None
@@ -30,6 +30,7 @@ func main() {
 	spinIdle := flag.Int("spinidle", 0, "adaptive polling: resume below this average batch size (0 = default 64)")
 	zc := flag.Int("zc", 0, "zero-copy send threshold in bytes, 0 disables")
 	inc := flag.Bool("inc", false, "incremental buffer ring (Linux 6.12+, experimental)")
+	backend := flag.String("backend", "auto", "event loop backend: auto, io_uring or epoll")
 	sq := flag.Uint("sq", 512, "submission queue size per ring (completion queue is 4x)")
 	bundle := flag.String("bundle", "auto", "recv bundles: auto (Linux 6.16+), on (force; 6.10-6.15 kernels may corrupt data), off")
 	flag.Parse()
@@ -43,6 +44,12 @@ func main() {
 		uringnet.WithZeroCopy(*zc),
 		uringnet.WithBusyPollThresholds(*spinBusy, *spinIdle),
 		uringnet.WithSQSize(*sq),
+	}
+	switch *backend {
+	case "io_uring":
+		opts = append(opts, uringnet.WithBackend(uringnet.BackendIOUring))
+	case "epoll":
+		opts = append(opts, uringnet.WithBackend(uringnet.BackendEpoll))
 	}
 	if *spinFixed {
 		opts = append(opts, uringnet.WithBusyPollFixed(*spin))

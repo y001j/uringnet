@@ -6,11 +6,13 @@
 
 **进度**（已完成的标记为 ✅）：
 - 第一阶段（第 1、2、3、7 项）：2026-11-22 完成，包含在 `v0.1.0-alpha` 中。
-- 第二阶段：第 4、5、8、9、10、11、19 项已完成（2026-11-22，分支 `feat/phase2-api`）；第 5 项中的 epoll 回退没有做。
+- 第二阶段：第 4、5、8、9、10、11、19 项已完成（2026-11-22，分支 `feat/phase2-api`）；第 5 项中的 epoll 回退已完成（BackendAuto/BackendEpoll）。
 - 第 20、21 项：随 v0.1.0 发布完成（iouring-go v0.1.0、x/sys v0.30.0、CHANGELOG）。
 - 第 6 项：模糊测试和压力测试已加入；顺带发现并修复了默认 SQ 过大导致多核机器上锁定内存不足的问题。
 - 第 12、13、15 项：拨出连接（Dial/DialAsync/NewClient）、UDP（ListenPacket）、分帧（Framed）已完成。
-- 第 17 项：`Server.Stats()`；第 22 项：`example_test.go`（pkg.go.dev 上的示例），注释统一为英文和架构文档还没做。
+- 第 17 项：`Server.Stats()`；第 22 项：`example_test.go`、代码注释统一为英文、架构文档 `docs/ARCHITECTURE.md`。
+- 第 16 项（零拷贝接收）不做：需要数据中心级专用网卡。
+- 第 5 项的 epoll 回退、第 14 项 TLS（WithTLS / WithDialTLS）已完成。
 
 优先级：**P0** 上生产前必须完成 · **P1** 发布 v0.1.0 前完成 · **P2** 按需求排期 · **P3** 长期目标
 
@@ -44,7 +46,7 @@
 - **要做的**：先停止 accept，等在途的发送完成或超时，再关闭连接和环；提供 `Shutdown(ctx context.Context) error`。
 - **验收**：关闭过程中已经发出的响应不会丢失。
 
-### 5. 启动检查和回退 · P1 ✅
+### 5. 启动检查和回退 · P1 ✅（含 epoll 回退）
 - **现状**：io_uring 被禁用（seccomp、`kernel.io_uring_disabled`）、`RLIMIT_MEMLOCK` 不足、内核版本太低时，只返回一个笼统的错误。
 - **要做的**：
   - 启动时逐项检测，给出明确的报错和解决办法。
@@ -98,7 +100,7 @@
 ### 13. UDP · P2 ✅
 物联网常用（CoAP、自定义协议）。用 multishot `recvmsg` 和 `sendmsg` 实现，回调中提供对端地址。
 
-### 14. TLS · P2
+### 14. TLS · P2 ✅
 可以基于 `crypto/tls` 加内存传输层实现，或者支持内核 TLS（kTLS），以便和零拷贝发送配合使用。
 
 ### 15. 编解码框架 · P2 ✅
@@ -137,7 +139,7 @@
 - **现状**：最新 tag 还是 `v0.0.3-alpha`，是重写之前的代码。
 - **要做的**：发布 `v0.1.0`，写 CHANGELOG，说明 API 的稳定性承诺和支持的内核版本范围。
 
-### 22. 文档 · P2
+### 22. 文档 · P2 ✅
 - 完善 godoc 注释（现在中英文混杂，建议统一用英文）。
 - 增加 `example_test.go`，示例会出现在 pkg.go.dev 上。
 - 写架构说明（事件循环、缓冲区生命周期、零拷贝流程）和贡献指南。

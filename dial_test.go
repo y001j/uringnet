@@ -17,7 +17,7 @@ import (
 	"time"
 )
 
-// collector 记录拨出连接收到的数据和 OnOpen 时看到的 Context
+// collector records the data received on dialed connections and the Context seen in OnOpen.
 type collector struct {
 	BuiltinHandler
 	mu       sync.Mutex
@@ -91,7 +91,7 @@ func TestDialEcho(t *testing.T) {
 
 func TestDialRefused(t *testing.T) {
 	cl := newTestClient(t, &collector{}, WithRings(1))
-	addr := freePort(t) // 已经关闭的端口
+	addr := freePort(t) // a port that is closed again
 	_, err := cl.Dial(context.Background(), "tcp4", addr, nil)
 	if !errors.Is(err, syscall.ECONNREFUSED) {
 		t.Fatalf("Dial to a closed port: %v, want ECONNREFUSED", err)
@@ -103,7 +103,7 @@ func TestDialRefused(t *testing.T) {
 	if err := <-done; !errors.Is(err, syscall.ECONNREFUSED) {
 		t.Fatalf("DialAsync to a closed port: %v", err)
 	}
-	// 有些环境的 DNS（如代理软件的 fake-IP）会把任何名字都解析成地址，这时跳过这项检查
+	// Some DNS setups (e.g. a proxy's fake-IP mode) resolve any name; skip this check there
 	if _, err := net.LookupHost("no-such-host.invalid"); err != nil {
 		if _, err := cl.Dial(context.Background(), "tcp4", "no-such-host.invalid:80", nil); err == nil {
 			t.Fatal("Dial to an unresolvable host succeeded")
@@ -111,11 +111,11 @@ func TestDialRefused(t *testing.T) {
 	}
 }
 
-// ctx 到期时放弃拨号：返回 ctx 的错误，之后也不会留下连接
+// When ctx ends, the dial is abandoned: ctx's error is returned and no connection is left behind.
 func TestDialContextTimeout(t *testing.T) {
 	h := &collector{}
 	cl := newTestClient(t, h, WithRings(1))
-	// 不可路由的地址：SYN 没有回应，连接一直挂着
+	// An unroutable address: the SYN gets no answer and the connect hangs
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 	start := time.Now()
@@ -159,7 +159,7 @@ func TestDialUnix(t *testing.T) {
 	waitFor(t, func() bool { return h.received() == "over unix" }, "echo over a unix socket")
 }
 
-// proxy：下游连接接入后从同一个事件循环拨上游，两边在回调中直接互相写
+// proxy: accepted connections dial upstream from the same event loop, and both sides write to each other directly in callbacks.
 type proxy struct {
 	BuiltinHandler
 	upstream string
@@ -167,11 +167,11 @@ type proxy struct {
 
 type proxySide struct {
 	peer    *Conn
-	pending []byte // 上游连接建立前收到的下游数据
+	pending []byte // client data received before the upstream connection is up
 }
 
 func (p *proxy) OnOpen(c *Conn) Action {
-	if c.Context() != nil { // 拨出的上游连接：Context 在 OnOpen 之前已经设置
+	if c.Context() != nil { // the dialed upstream connection: its Context is set before OnOpen
 		return None
 	}
 	down := &proxySide{}
@@ -196,7 +196,7 @@ func (p *proxy) OnTraffic(c *Conn, data []byte) Action {
 		side.pending = append(side.pending, data...)
 		return None
 	}
-	side.peer.Write(data) // 同一个事件循环：直接写，数据被拷贝进对方的发送队列
+	side.peer.Write(data) // same event loop: write directly; the data is copied into the peer's send queue
 	return None
 }
 
@@ -241,7 +241,7 @@ func TestDialProxy(t *testing.T) {
 	for err := range errs {
 		t.Fatal(err)
 	}
-	// 客户端关闭后，代理两侧的连接都要关闭
+	// Once the clients close, both sides of every proxied connection must close
 	waitFor(t, func() bool { return front.Connections() == 0 }, "proxy connections closed")
 	if st := front.Stats(); st.Accepted != 8 || st.Dialed != 8 {
 		t.Fatalf("proxy stats %+v", st)

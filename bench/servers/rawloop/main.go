@@ -1,7 +1,7 @@
 //go:build linux
 
-// 直接基于 iouring.Loop 的最简 echo 服务，作为 uringnet 封装开销的基线。
-// 环境变量：BUFS（缓冲区数量，默认 1024）、BUFSIZE（默认 16384）、NOSI=1（关闭 SINGLE_ISSUER/DEFER_TASKRUN）
+// Minimal echo server directly on iouring.Loop, the baseline for uringnet's wrapper overhead.
+// Environment: BUFS (buffer count, default 1024), BUFSIZE (default 16384), NOSI=1 (disable SINGLE_ISSUER/DEFER_TASKRUN).
 package main
 
 import (
