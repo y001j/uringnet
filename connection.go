@@ -130,6 +130,7 @@ func (c *conn) onRecv(res int32, flags uint32) {
 	rn := c.rn
 	if res > 0 {
 		c.lastActive = rn.tick
+		rn.bytesIn += uint64(res)
 	}
 	c.batching = true
 	if rn.bundle {
@@ -169,6 +170,7 @@ func (c *conn) onRecv(res int32, flags uint32) {
 		// 为暂停而取消，但取消完成前暂停已经解除
 		c.armRecv()
 	case res == -int32(syscall.ENOBUFS):
+		rn.enobufs++
 		// 缓冲区暂时耗尽。若有缓冲区被在途 send 占用，等它归还后再重新提交；
 		// 否则所有已处理的缓冲区都已归还，下一次 io_uring_enter 会先发布再提交，可立即重试。
 		if rn.held > 0 {
@@ -418,6 +420,7 @@ func (c *conn) onSend(res int32, flags uint32) {
 		return
 	}
 	c.qBytes -= int(res)
+	c.rn.bytesOut += uint64(res)
 	c.lastActive, c.lastSend = c.rn.tick, c.rn.tick
 	// 按发送的字节数依次移除已发完的段；短写时停在未发完的段上
 	for remain := int(res); remain > 0; {

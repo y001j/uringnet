@@ -152,6 +152,12 @@ type URingNet struct {
 	acceptArms    int           // 提交 accept 的次数（测试用）
 	timeouts      int           // 因超时关闭的连接数（测试用）
 
+	// 运行指标（Server.Stats），只在 Loop 线程中更新
+	accepted, acceptErrs    uint64
+	bytesIn, bytesOut       uint64
+	enobufs                 uint64 // multishot recv 因缓冲区耗尽（-ENOBUFS）而终止的次数
+	idleCloses, writeCloses uint64
+
 	connCount atomic.Int64
 
 	shutdownOnce sync.Once
@@ -457,6 +463,7 @@ func (rn *URingNet) armAccept() {
 
 func (rn *URingNet) onAccept(res int32, flags uint32) {
 	if res >= 0 {
+		rn.accepted++
 		rn.acceptBackoff = 0
 		if rn.stopping || rn.draining {
 			unix.Close(int(res))
@@ -472,6 +479,7 @@ func (rn *URingNet) onAccept(res int32, flags uint32) {
 		rn.armAccept()
 		return
 	}
+	rn.acceptErrs++
 	// 出错终止（如 EMFILE/ENFILE：fd 用完）。立即重新提交通常会马上再次失败，形成空转，
 	// 所以等一段时间再提交，连续失败时等待时间翻倍；连接仍留在监听队列中，恢复后会被 accept。
 	if rn.acceptBackoff == 0 {
