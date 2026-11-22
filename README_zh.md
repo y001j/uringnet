@@ -7,6 +7,7 @@
 
 <p align="center">
   <a href="https://github.com/y001j/uringnet/actions/workflows/go.yml"><img alt="Build" src="https://github.com/y001j/uringnet/actions/workflows/go.yml/badge.svg?branch=master"></a>
+  <a href="https://codecov.io/gh/y001j/uringnet"><img alt="Coverage" src="https://codecov.io/gh/y001j/uringnet/branch/master/graph/badge.svg"></a>
   <a href="https://pkg.go.dev/github.com/y001j/uringnet"><img alt="Go Reference" src="https://pkg.go.dev/badge/github.com/y001j/uringnet.svg"></a>
   <a href="go.mod"><img alt="Go version" src="https://img.shields.io/github/go-mod/go-version/y001j/uringnet"></a>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/github/license/y001j/uringnet"></a>

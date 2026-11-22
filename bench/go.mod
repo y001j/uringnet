@@ -4,9 +4,9 @@ go 1.21
 
 require (
 	github.com/panjf2000/gnet/v2 v2.3.3
-	github.com/y001j/iouring-go v0.0.0-20261122044903-fd433968920b
+	github.com/y001j/iouring-go v0.1.0
 	github.com/y001j/uringnet v0.0.0
-	golang.org/x/sys v0.12.0
+	golang.org/x/sys v0.30.0
 )
 
 require (
