@@ -13,12 +13,15 @@
 
 UringNet is a lightweight network I/O framework written in Go, built on [io_uring](https://kernel.dk/io_uring.pdf), the asynchronous I/O interface Linux added in 5.1 (2019). It comes from experimental projects in my edge computing and IoT research: I wanted a simple but fast way to move network packets in IoT gateways, tried select/epoll first, and then io_uring.
 
-Measured against a hand-written epoll loop and [gnet](https://github.com/panjf2000/gnet) (see [Benchmark](#benchmark), Linux 6.17):
+Measured against a hand-written epoll loop and [gnet](https://github.com/panjf2000/gnet) on Linux 6.17, with the recommended
+configuration (incremental buffers + adaptive busy polling; see [Benchmark](#benchmark)):
 
-- **Busy server** (CPU-bound): about the same as epoll and gnet, from equal to roughly 10% faster.
-- **Low and medium load, latency-sensitive** (request/response): with `SpinTime` enabled, 1.1–1.5x the throughput of epoll and
-  up to half the median latency, at the cost of extra CPU. Without it, up to ~20% behind epoll.
-- **Bulk pipelined transfers**: 1.4–1.6x of epoll, but behind gnet (1.7–1.8x).
+- **Low load** (1–16 connections): 1.5–1.6x the throughput of epoll for small messages, and the median latency drops from
+  ~78µs to ~30µs. The cost is CPU: about twice the server CPU at the lowest load.
+- **Many connections, small messages** (512 connections, 128B): 1.17–1.19x of epoll, 14–34% ahead of gnet.
+- **16KB messages under medium and high load**: gnet stays ahead by 12–20% (bulk pipelined: 1.58–1.78x of epoll vs 1.77–2.13x).
+- Overall, of 14 scenarios uringnet is more than 10% ahead of gnet in 6, within ±10% in 5 and behind in 3.
+- On an older kernel (6.10) without busy polling, uringnet is mostly 10–30% behind epoll.
 
 What io_uring brings is far fewer system calls (under load as few as 0.04 per request, versus 2–3 for epoll), batched submission, and
 zero-copy send for large buffers. The gains depend heavily on the workload and the machine, so measure with your own traffic.
@@ -199,127 +202,138 @@ docker run --rm --security-opt seccomp=unconfined -v "$PWD":/src -w /src golang:
 
 ## Benchmark
 
-Echo benchmark from [`bench/`](bench/README.md): one client keeps `c` connections open and on each one sends `p` requests of
-`s` bytes, then reads all responses back. Servers compared:
+### Method
 
-- **epoll**: hand-written epoll event loop (one locked thread per core, `SO_REUSEPORT`, non-blocking read/write)
-- **gnet**: [gnet](https://github.com/panjf2000/gnet) v2, an epoll framework
-- **uringnet**: this project with default settings (256 receive buffers of 16KB; recv bundles on, since the kernel is 6.16+)
-- **uringnet + SpinTime**: the same with `SpinTime = 50µs`
+- **Workload**: echo. One client keeps `c` connections open (1, 16, 64, 512). On each connection it writes `p` requests of `s` bytes
+  (`p` = 1 for request/response, 8 for pipelined; `s` = 128B or 16KB), then reads all responses back, in a loop.
+- **Servers compared**: a hand-written **epoll** loop (one locked thread per core, `SO_REUSEPORT`, non-blocking read/write),
+  [**gnet**](https://github.com/panjf2000/gnet) v2, and **uringnet**. All run the same echo logic.
+- **Server-bound setup**: the server is pinned to **1 core** (`taskset`, `GOMAXPROCS=1`, one event loop), the client to the other
+  cores, over loopback. Each scenario runs 3 times for 3 seconds; the tables show the median.
+- **Metrics**: throughput (requests/s, shown relative to epoll), median latency (p50, sampled by the client), server CPU (from `/proc`).
+- **Environment**: Lima VM (Apple Virtualization.framework) on an Apple Silicon Mac, Ubuntu 25.10, **Linux 6.17**, 4 vCPUs
+  (server 1 core, client 3 cores). A Docker Desktop VM with Linux 6.10 is shown for reference.
+- **Tooling**: everything is in [`bench/`](bench/README.md); see *Reproducing* below.
 
-> **Environment:** Lima VM (Apple Virtualization.framework) on an Apple Silicon Mac, Ubuntu 25.10, **Linux 6.17**, 4 vCPUs.
-> The server is pinned to **1 core** (CPU 0, `GOMAXPROCS=1`, one event loop) and the client to the other 3 cores, over loopback.
-> Each number is the median of 3 runs of 3 seconds. Numbers in parentheses are relative to epoll.
+### Results: recommended configuration (Linux 6.17)
 
-### Request/response (`p = 1`)
+uringnet with incremental buffers (32 x 64KB per ring). Throughput relative to epoll; **bold** = fastest.
 
-| Connections, size | epoll | gnet | uringnet | uringnet + SpinTime |
-|---|---|---|---|---|
-| 1, 128B | 8k | 1.05 | 1.11 | **1.52** |
-| 1, 16KB | 7k | **1.21** | 1.06 | 1.13 |
-| 16, 128B | 106k | 1.11 | 0.87 | **1.37** |
-| 16, 16KB | 77k | 1.03 | 0.81 | **1.27** |
-| 64, 128B | 200k | 1.17 | 1.00 | **1.21** |
-| 64, 16KB | 145k | **1.10** | 0.97 | 1.06 |
-| 512, 128B | 361k | 0.97 | 1.01 | **1.06** |
-| 512, 16KB | 187k | 1.00 | 1.09 | **1.11** |
-
-Median latency (p50) and server CPU:
-
-| Connections, size | epoll | gnet | uringnet | uringnet + SpinTime |
-|---|---|---|---|---|
-| 1, 128B | 79µs / 25% | 75µs / 22% | 80µs / 27% | **34µs** / 61% |
-| 16, 128B | 108µs / 63% | 87µs / 62% | 120µs / 55% | **56µs** / 76% |
-| 16, 16KB | 155µs / 69% | 135µs / 65% | 204µs / 66% | **96µs** / 83% |
-| 64, 128B | 213µs / 82% | 191µs / 86% | 225µs / 78% | **169µs** / 86% |
-| 512, 128B | 1229µs / 97% | 1263µs / 98% | 1152µs / 94% | **1087µs** / 94% |
-
-### Pipelined (`p = 8` requests in flight per connection)
-
-| Connections, size | epoll | gnet | uringnet, no bundles | uringnet (bundles) |
-|---|---|---|---|---|
-| 64, 128B | 1.68M | **1.11** | 0.98 | 1.01 |
-| 64, 16KB | 196k | **1.70** | 1.41 | 1.50 |
-| 512, 128B | 2.39M | 0.99 | **1.07** | 1.04 |
-| 512, 16KB | 154k | **1.82** | 1.43 | 1.61 |
-
-### Incremental buffers (experimental)
-
-Same setup; uringnet with `IncrementalBuffers`, 32 x 64KB buffers per ring:
-
-| Connections, `p`, size | epoll | gnet | uringnet (bundles, 64 x 16KB) | uringnet, incremental |
-|---|---|---|---|---|
-| 64, 1, 128B | 197k | 1.16 | 1.10 | **1.19** |
-| 64, 1, 16KB | 152k | **1.04** | 0.93 | 0.92 |
-| 64, 8, 128B | 1.69M | **1.14** | 1.01 | 1.09 |
-| 64, 8, 16KB | 205k | **1.68** | 1.51 | 1.60 |
-| 512, 1, 128B | 340k | 0.99 | 0.97 | **1.16** |
-| 512, 1, 16KB | 215k | 0.99 | 0.96 | **1.05** |
-| 512, 8, 128B | 2.66M | 1.00 | 0.96 | **1.14** |
-| 512, 8, 16KB | 172k | **1.75** | 1.52 | 1.57 |
-
-Median latency at 512 connections, `p = 8`, 16KB: epoll 23.3ms, gnet 12.3ms, uringnet with bundles 22.4ms, incremental 10.9ms.
-
-### Adaptive busy polling
-
-`SpinTime` polling is adaptive: every 10ms the event loop computes how many completions it handles per iteration on average.
-It stops polling when that reaches `SpinBusyBatch` (default 128) and resumes below `SpinIdleBatch` (default 64). At low load
-an iteration handles a few completions, so polling saves the sleep/wake-up. Under full load hundreds pile up per iteration;
-blocking lets data accumulate into larger batches, while polling splits them up. (The *Request/response* table above was
-measured with always-on polling, before polling became adaptive.)
-
-Same setup, incremental buffers (32 x 64KB), `SpinTime = 50µs`:
-
-| Connections, `p`, size | epoll | gnet | no polling | always polling | adaptive polling |
+| Connections, in flight, size | epoll | gnet | uringnet, no polling | uringnet, always polling | uringnet, adaptive polling |
 |---|---|---|---|---|---|
-| 1, 1, 128B | 10k | 1.05 | 0.98 | **1.67** | 1.60 |
-| 16, 1, 128B | 103k | 1.09 | 0.90 | 1.45 | **1.52** |
-| 16, 1, 16KB | 81k | 0.94 | 0.72 | **1.12** | 1.06 |
-| 16, 8, 16KB | 144k | **1.59** | 1.22 | 1.41 | **1.58** |
-| 64, 1, 128B | 201k | 1.24 | 1.00 | **1.26** | 1.21 |
-| 64, 1, 16KB | 152k | **1.06** | 0.69 | 0.90 | 0.90 |
-| 64, 8, 16KB | 190k | **1.77** | 1.61 | 1.61 | 1.58 |
-| 512, 1, 128B | 319k | 0.89 | 1.13 | 1.13 | **1.19** |
-| 512, 1, 16KB | 199k | 0.97 | **1.00** | 0.81 | 0.93 |
-| 512, 8, 16KB | 136k | **2.13** | 1.84 | 1.87 | 1.78 |
+| 1, 1, 128B | 10k/s | 1.05 | 0.98 | **1.67** | 1.60 |
+| 1, 1, 16KB | 8k/s | 1.03 | 0.99 | **1.07** | 1.05 |
+| 16, 1, 128B | 103k/s | 1.09 | 0.90 | 1.45 | **1.52** |
+| 16, 1, 16KB | 81k/s | 0.94 | 0.72 | **1.12** | 1.06 |
+| 16, 8, 128B | 773k/s | 1.16 | 0.92 | **1.59** | 1.56 |
+| 16, 8, 16KB | 144k/s | **1.59** | 1.22 | 1.41 | 1.58 |
+| 64, 1, 128B | 201k/s | 1.24 | 1.00 | **1.26** | 1.21 |
+| 64, 1, 16KB | 152k/s | **1.06** | 0.69 | 0.90 | 0.90 |
+| 64, 8, 128B | 1.76M/s | 1.03 | 0.95 | **1.05** | 0.97 |
+| 64, 8, 16KB | 190k/s | **1.77** | 1.61 | 1.61 | 1.58 |
+| 512, 1, 128B | 319k/s | 0.89 | 1.13 | 1.13 | **1.19** |
+| 512, 1, 16KB | 199k/s | 0.97 | **1.00** | 0.81 | 0.93 |
+| 512, 8, 128B | 2.38M/s | 1.03 | 1.16 | **1.17** | **1.17** |
+| 512, 8, 16KB | 136k/s | **2.13** | 1.84 | 1.87 | 1.78 |
 
-Adaptive polling keeps the low-load gains (median latency 78µs → 30µs at one connection) and recovers most of what always-on
-polling loses under full load (512 connections, 16KB: 0.81x → 0.93x of epoll; 1.00x without polling).
+Median latency / server CPU:
 
-### Reading the results
+| Connections, in flight, size | epoll | gnet | uringnet, no polling | uringnet, adaptive polling |
+|---|---|---|---|---|
+| 1, 1, 128B | 78µs / 27% | 74µs / 25% | 78µs / 30% | **30µs** / 68% |
+| 1, 1, 16KB | 89µs / 28% | 85µs / 26% | 100µs / 31% | **69µs** / 60% |
+| 16, 1, 128B | 106µs / 63% | 84µs / 59% | 120µs / 56% | **57µs** / 81% |
+| 16, 1, 16KB | 150µs / 71% | 145µs / 63% | 208µs / 66% | **113µs** / 81% |
+| 16, 8, 16KB | 732µs / 88% | 456µs / 85% | 584µs / 78% | **406µs** / 87% |
+| 64, 1, 128B | 212µs / 80% | 187µs / 86% | 216µs / 78% | **170µs** / 85% |
+| 64, 1, 16KB | 307µs / 85% | **285µs** / 85% | 420µs / 77% | 303µs / 87% |
+| 64, 8, 16KB | 2.42ms / 93% | **1.30ms** / 92% | 1.34ms / 92% | 1.32ms / 96% |
+| 512, 1, 128B | 1.34ms / 97% | 1.43ms / 97% | 1.16ms / 95% | **1.10ms** / 94% |
+| 512, 1, 16KB | 2.29ms / 98% | 2.33ms / 98% | **2.26ms** / 97% | 2.43ms / 95% |
+| 512, 8, 16KB | 27.3ms / 97% | **13.0ms** / 97% | 13.2ms / 99% | 13.3ms / 99% |
 
-- **When the server is busy** (512 connections, server CPU ≥ 94%), uringnet matches or slightly beats epoll and gnet.
-- **At low and medium load**, request/response throughput is bounded by latency, not CPU. Without busy polling, the event loop
-  sleeps and wakes up more often than epoll per request, so it trails epoll by up to ~20%. With `SpinTime = 50µs` it leads both
-  epoll and gnet and halves the median latency. The cost is CPU: about twice the server CPU at the lowest load, and almost nothing
-  extra once the server is busy. A 10µs spin was mostly too short to make a difference in this environment.
-- **Incremental buffers** close most of the remaining gap: with them uringnet leads at 512 connections and is within 5–10%
-  of gnet for bulk pipelined transfers.
-- **Bulk pipelined transfers** are where gnet is strongest. gnet reads up to 64KB per connection into one buffer that stays hot
-  in the CPU cache, and only when the event loop gets to that connection. io_uring provided buffers are filled by the kernel as
-  soon as data arrives, so every connection with pending data holds a buffer. Recv bundles narrow the gap (1.43x → 1.61x of epoll at
-  512 connections). gnet's throughput here comes partly at the expense of fairness: in earlier runs its p99 latency was 450ms+,
-  versus 40–70ms for uringnet.
-- **Zero-copy send** is not shown: traffic to a local socket is always copied by the kernel, so it has to be measured across
-  machines on a real NIC.
+### Results: default configuration vs incremental buffers (Linux 6.17)
+
+Default = recv bundles with 64 x 16KB buffers; incremental = 32 x 64KB. No polling in either.
+
+| Connections, in flight, size | epoll | gnet | uringnet, default | uringnet, incremental |
+|---|---|---|---|---|
+| 64, 1, 128B | 197k/s | 1.16 | 1.10 | **1.19** |
+| 64, 1, 16KB | 152k/s | **1.04** | 0.93 | 0.92 |
+| 64, 8, 128B | 1.69M/s | **1.14** | 1.01 | 1.09 |
+| 64, 8, 16KB | 205k/s | **1.68** | 1.51 | 1.60 |
+| 512, 1, 128B | 340k/s | 0.99 | 0.97 | **1.16** |
+| 512, 1, 16KB | 215k/s | 0.99 | 0.96 | **1.05** |
+| 512, 8, 128B | 2.66M/s | 1.00 | 0.96 | **1.14** |
+| 512, 8, 16KB | 172k/s | **1.75** | 1.52 | 1.57 |
+
+Median latency at 512 connections, 8 in flight, 16KB: epoll 23.3ms, gnet 12.3ms, default 22.4ms, incremental **10.9ms**.
+
+### Results: older kernel (Linux 6.10, reference)
+
+Docker Desktop VM, server 1 core, client 8 cores. Linux 6.10 has no incremental buffers and recv bundles are disabled on it by
+default. Measured with an earlier version of the code (before batched sends and adaptive polling), without polling.
+
+| Connections, in flight, size | epoll | gnet | uringnet |
+|---|---|---|---|
+| 64, 1, 128B | 226k/s | **1.01** | 0.78 |
+| 64, 1, 16KB | 176k/s | **1.04** | 0.68 |
+| 64, 8, 128B | 1.88M/s | **1.03** | 0.67 |
+| 64, 8, 16KB | 264k/s | **1.56** | 1.29 |
+| 512, 1, 128B | 421k/s | **0.99** | 0.91 |
+| 512, 1, 16KB | 257k/s | **0.98** | 0.78 |
+| 512, 8, 128B | 3.27M/s | **0.98** | 0.89 |
+| 512, 8, 16KB | 194k/s | **1.69** | 1.54 |
+
+### Comparison with gnet
+
+With the recommended configuration on Linux 6.17 (adaptive polling column above):
+
+| | Scenarios |
+|---|---|
+| uringnet ahead by more than 10% (6) | 1 conn 128B (+52%), 16 conn 128B (+39%), 16 conn 16KB (+13%), 16 conn x8 128B (+34%), 512 conn 128B (+34%), 512 conn x8 128B (+14%) |
+| within ±10% (5) | 1 conn 16KB, 16 conn x8 16KB, 64 conn 128B, 64 conn x8 128B, 512 conn 16KB |
+| gnet ahead by more than 10% (3) | 64 conn 16KB (+18%), 64 conn x8 16KB (+12%), 512 conn x8 16KB (+20%) |
+
+Why the two designs win in different places:
+
+- **uringnet**: far fewer system calls (as few as 0.04 per request under load, versus 2–3 for epoll) and batched submission. With
+  busy polling the event loop avoids sleep/wake-up cycles, which dominate latency at low load.
+- **gnet**: reads up to 64KB per connection into one buffer that stays hot in the CPU cache, and only when the event loop gets to
+  that connection. io_uring provided buffers are filled by the kernel as soon as data arrives, so data is copied into colder memory
+  and more of it must be buffered. That favours gnet for bulk transfers. Its throughput there partly costs fairness: in earlier runs
+  its p99 latency was 450–580ms, versus 40–90ms for uringnet.
+
+### Conclusions
+
+1. On a recent kernel (6.17) with incremental buffers and adaptive polling, uringnet matches or beats gnet in 11 of 14 scenarios.
+   The lead is largest at low load (up to 1.5x of gnet, about 40% of its median latency) and for many connections with small messages.
+2. gnet remains better for 16KB messages under medium and high load, especially bulk pipelined transfers (12–20%).
+3. Busy polling trades CPU for latency: about twice the server CPU at low load. Adaptive polling turns it off under full load,
+   where always-on polling would cost up to ~20% throughput (512 connections, 16KB: 0.81x vs 0.93x of epoll).
+4. The kernel version matters: on 6.10 without polling, uringnet is mostly 10–30% behind epoll.
+5. Zero-copy send is not measured: data sent to a local socket is always copied by the kernel, so it needs two machines and a real NIC.
 
 ### Caveats
 
-These are loopback numbers in a VM. Waking an idle vCPU is expensive in a VM, which favors busy polling more than bare metal
-would. With only 3 client cores, differences at high concurrency may be compressed. Results vary by 5–15% between runs, so treat
-differences under 10% as a tie.
+- These are loopback numbers in VMs. Waking an idle vCPU is expensive in a VM, which favours busy polling more than bare metal would.
+- Results vary by 5–15% between runs, more for bulk pipelined transfers (gnet measured 1.75–2.13x of epoll in different runs).
+  Treat differences under 10% as a tie.
+- The 6.17 VM has only 3 client cores, which may compress differences at high concurrency.
+- The 6.10 results come from an earlier version of the code.
 
-The same benchmark in Docker Desktop (Linux 6.10, recv bundles disabled, 1-core server with an 8-core client, without
-`SpinTime`) was less favorable to uringnet: 0.67–0.78x of epoll at 64 connections, 0.78–0.91x at 512 connections, and
-1.29–1.54x for pipelined 16KB (gnet: 1.56–1.69x).
+### Reproducing
 
-To reproduce, or better, to measure on your own hardware:
+Measure on your own hardware, with your own traffic, before deciding:
 
 ```shell
 bench/docker.sh                               # in Docker, server 4 cores / client 4 cores
 MODE=onecore DEPTHS="1 8" bench/docker.sh     # server 1 core / client 8 cores
 sh bench/scripts/run.sh                       # directly on a Linux machine (needs taskset and 12 CPUs)
 ```
+
+`SERVERS="epoll gnet uringnet uringnet-inc uringnet-spin"` selects the servers; `servers/uringnet` takes `-inc`, `-spin`,
+`-spinfixed`, `-bufs`, `-bufsize` and more (see [bench/README.md](bench/README.md)).
 
 ## Known Issues
 
