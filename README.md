@@ -7,6 +7,7 @@
 
 <p align="center">
   <a href="https://github.com/y001j/uringnet/actions/workflows/go.yml"><img alt="Build" src="https://github.com/y001j/uringnet/actions/workflows/go.yml/badge.svg?branch=master"></a>
+  <a href="https://codecov.io/gh/y001j/uringnet"><img alt="Coverage" src="https://codecov.io/gh/y001j/uringnet/branch/master/graph/badge.svg"></a>
   <a href="https://pkg.go.dev/github.com/y001j/uringnet"><img alt="Go Reference" src="https://pkg.go.dev/badge/github.com/y001j/uringnet.svg"></a>
   <a href="go.mod"><img alt="Go version" src="https://img.shields.io/github/go-mod/go-version/y001j/uringnet"></a>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/github/license/y001j/uringnet"></a>
@@ -130,6 +131,7 @@ func main() {
 |---|---|
 | `WithRings(n)` | number of event loops, each with its own io_uring and locked OS thread (default `runtime.NumCPU()`) |
 | `WithBuffers(count, size)` | receive buffers per ring: `count` (rounded up to a power of 2, default 256) of `size` bytes (default 16KB). See *Sizing receive buffers* |
+| `WithSQSize(n)` | submission queue size per ring (default 512; the completion queue is 4x). See the locked-memory note under *Known Issues* |
 | `WithBusyPoll(d)` | poll for completions for `d` (e.g. `50*time.Microsecond`) before blocking: lower latency for more CPU. Adaptive: it stops while the loop is fully loaded |
 | `WithBusyPollThresholds(busy, idle)` / `WithBusyPollFixed(d)` | tune the adaptive thresholds (default 128 / 64 completions per loop iteration) / always poll |
 | `WithZeroCopy(threshold)` | send writes of at least `threshold` bytes with `IORING_OP_SEND_ZC`; see below |
@@ -411,6 +413,10 @@ at the top of that script and rerun it after new measurements.
 
 - Requires Linux 6.0+ with io_uring enabled. Docker's default seccomp profile and Kubernetes `RuntimeDefault` block io_uring,
   and Linux 6.6+ can disable it with `kernel.io_uring_disabled`. There is no epoll fallback yet.
+- io_uring rings count against `RLIMIT_MEMLOCK`, per user, for processes without `CAP_IPC_LOCK`: about 70KB per ring
+  with the default SQ size of 512 (550KB at 4096), plus the receive buffers when zero-copy registers them. With the
+  common 8MB limit that is about 110 rings. If `Listen` fails with "out of locked memory", raise `ulimit -l`
+  (`LimitMEMLOCK=` for systemd services) or use fewer rings.
 - Only stream sockets (TCP, Unix) are supported; UDP and TLS are not.
 - Recv bundles need Linux 6.16+ for correct data (see *Recv bundles*).
 - When accept fails (for example `EMFILE`) it is retried with exponential backoff (5ms up to 1s) and logged with `WithLogger`.

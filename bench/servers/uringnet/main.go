@@ -30,6 +30,7 @@ func main() {
 	spinIdle := flag.Int("spinidle", 0, "adaptive polling: resume below this average batch size (0 = default 64)")
 	zc := flag.Int("zc", 0, "zero-copy send threshold in bytes, 0 disables")
 	inc := flag.Bool("inc", false, "incremental buffer ring (Linux 6.12+, experimental)")
+	sq := flag.Uint("sq", 512, "submission queue size per ring (completion queue is 4x)")
 	bundle := flag.String("bundle", "auto", "recv bundles: auto (Linux 6.16+), on (force; 6.10-6.15 kernels may corrupt data), off")
 	flag.Parse()
 	if flag.NArg() != 1 {
@@ -41,6 +42,7 @@ func main() {
 		uringnet.WithBuffers(*bufs, *bufSize),
 		uringnet.WithZeroCopy(*zc),
 		uringnet.WithBusyPollThresholds(*spinBusy, *spinIdle),
+		uringnet.WithSQSize(*sq),
 	}
 	if *spinFixed {
 		opts = append(opts, uringnet.WithBusyPollFixed(*spin))

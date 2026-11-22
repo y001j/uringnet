@@ -580,7 +580,9 @@ func setupError(err error) error {
 			"allowing io_uring_setup/io_uring_enter/io_uring_register; also check sysctl kernel.io_uring_disabled)",
 			errors.ErrRingSetup, ErrIOUringUnavailable, err)
 	case stderrors.Is(err, syscall.ENOMEM):
-		return fmt.Errorf("%w: %v (out of locked memory? raise RLIMIT_MEMLOCK, ulimit -l, or use fewer/smaller buffers)",
+		return fmt.Errorf("%w: %v (out of locked memory? io_uring rings count against RLIMIT_MEMLOCK per user, "+
+			"about 70KB per ring at the default SQ size of 512: raise ulimit -l / LimitMEMLOCK, or use fewer rings "+
+			"(WithRings) or a smaller SQ (WithSQSize); with zero-copy the receive buffers are locked too)",
 			errors.ErrRingSetup, err)
 	}
 	return fmt.Errorf("%w: %v", errors.ErrRingSetup, err)
