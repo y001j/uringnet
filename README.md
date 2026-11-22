@@ -124,6 +124,7 @@ func main() {
 | `Server.Shutdown(ctx)` | graceful: stop accepting, let each connection send the data already written, then close it; connections still open when `ctx` ends are closed at once |
 | `Server.Close()` | close everything at once |
 | `Server.Addr()` / `Connections()` | listening address (with the real port for `:0`) / open connections |
+| `Server.Stats()` | counters: accepted connections, bytes in/out, timeouts, accept errors, receive-buffer exhaustion, backpressure pauses, zero-copy sends. Publish them with `expvar.Func` or any metrics library |
 
 **Options**
 

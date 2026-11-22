@@ -386,3 +386,27 @@ func TestPeerHalfClose(t *testing.T) {
 		t.Fatalf("OnClose error %v, want io.EOF", err)
 	}
 }
+
+func TestServerStats(t *testing.T) {
+	h := &apiEcho{}
+	s, addr := serve(t, h, WithRings(2), WithIdleTimeout(200*time.Millisecond))
+	msg := make([]byte, 1000)
+	for i := 0; i < 3; i++ {
+		c, err := net.Dial("tcp4", addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.Write(msg)
+		readN(t, c, len(msg))
+		if i < 2 {
+			c.Close()
+		} else {
+			defer c.Close() // 留着不动，由空闲超时关闭
+		}
+	}
+	waitFor(t, func() bool { return s.Stats().IdleTimeouts == 1 }, "idle timeout counted")
+	st := s.Stats()
+	if st.Accepted != 3 || st.BytesRead != 3000 || st.BytesWritten != 3000 || st.Connections != 0 {
+		t.Fatalf("stats = %+v", st)
+	}
+}
