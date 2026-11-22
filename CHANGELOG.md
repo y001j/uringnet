@@ -4,7 +4,10 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/). Before v1.0.0, minor versions may change the API.
 
-## [Unreleased]
+## [v0.2.0] - 2026-11-22
+
+Adds outgoing connections, UDP and message framing. No breaking changes: code written for v0.1.0
+builds unchanged.
 
 ### Added
 - Outgoing connections: `Server.Dial`, `Server.DialAsync`, `Conn.DialAsync` (same event loop, for proxies) and
@@ -76,6 +79,7 @@ Pre-release of the rebuilt core with the hardening above, before the API rework.
 
 Last release of the original implementation.
 
+[v0.2.0]: https://github.com/y001j/uringnet/compare/v0.1.0...v0.2.0
 [v0.1.0]: https://github.com/y001j/uringnet/compare/v0.0.3-alpha...v0.1.0
 [v0.1.0-alpha]: https://github.com/y001j/uringnet/compare/v0.0.3-alpha...v0.1.0-alpha
 [v0.0.3-alpha]: https://github.com/y001j/uringnet/releases/tag/v0.0.3-alpha
