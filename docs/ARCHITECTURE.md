@@ -171,17 +171,19 @@ When io_uring is unavailable (kernel before 6.0, blocked by seccomp, `kernel.io_
 uses `epollLoop`, which implements the same `eventLoop` operations with non-blocking sockets and
 level-triggered epoll:
 
-- multishot accept, recv and recvmsg keep reading while the fd is readable (recv stops after a short read,
-  since the socket is then most likely drained);
+- multishot accept, recv and recvmsg keep reading while the fd is readable. recv uses `readv` into two buffers:
+  an empty second buffer shows the socket is drained without the extra read that would return `EAGAIN`;
 - receives take buffers from an emulated pool (a LIFO free list, so recently returned buffers are reused while
   cache-hot) and report `-ENOBUFS` when it is empty, so the starvation logic above applies unchanged;
 - sends are tried immediately and retried on `EPOLLOUT` after `EAGAIN`; connect completes on `EPOLLOUT`;
 - timers live in a heap that bounds `epoll_wait`;
 - every completion is queued and delivered after the submitting call returns, exactly as with io_uring, so the
-  state machine is never re-entered from inside a submission.
+  state machine is never re-entered from inside a submission. Completions are delivered after each fd's events,
+  not after the whole `epoll_wait` batch, so a reply is not delayed by reading the other ready fds first;
+- in-place sends may hold every buffer (io_uring keeps half free for the kernel to choose from).
 
 Zero-copy send, recv bundles and incremental buffers are io_uring features and are disabled on epoll. In the
-benchmark the epoll backend reaches 0.77–1.18x of a hand-written epoll loop.
+benchmark the epoll backend reaches 0.76–1.62x of a hand-written epoll loop (median 0.94).
 
 ## Memory
 
