@@ -25,6 +25,7 @@ and gained a new public API. **Requires Linux 6.0 or later.**
 - Per-connection send queue limit with backpressure, idle and write timeouts, exponential backoff
   when accept fails, `log/slog` logging, startup checks with `ErrKernelTooOld` and
   `ErrIOUringUnavailable`.
+- `FuzzEcho` fuzz test and `TestStressChurn` leak/stress test.
 - Benchmark suite in `bench/` (single machine and cross-machine), results and charts in the README,
   Chinese README, roadmap (`docs/ROADMAP.md`).
 - CI on Go 1.21 and stable with the race detector, staticcheck and coverage.
@@ -46,6 +47,9 @@ and gained a new public API. **Requires Linux 6.0 or later.**
 - The unimplemented `Conn`, `Reader`, `Writer`, `Socket` and `AsyncCallback` interfaces.
 
 ### Fixed
+- `Listen` uses a submission queue of 512 entries by default, about 70KB of locked memory per ring.
+  A queue of 4096 locked about 550KB per ring, so with the common 8MB `RLIMIT_MEMLOCK` only 15 rings
+  could be created and the default (one ring per CPU) failed on machines with 16 or more cores.
 - Accept no longer spins at full CPU when it fails (for example `EMFILE`).
 - A peer that never reads can no longer make the server buffer data without limit.
 - `example/httpserver` honours HTTP/1.0 and `Connection: close` (#14).
