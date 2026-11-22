@@ -335,6 +335,9 @@ func TestZeroCopyEcho(t *testing.T) {
 	defer loop.Shutdown()
 
 	runEchoClients(t, addr, 16, []int{100, 1500, 2048, 4096, 65536, 1 << 20})
+	if loop.RingNet[0].backend == BackendEpoll {
+		t.Skip("the epoll backend has no zero-copy send; echo data was verified above")
+	}
 
 	total := 0
 	for _, rn := range loop.RingNet {

@@ -112,14 +112,18 @@ type URingNet struct {
 	// Logger 接收运行中的异常和回退（accept 失败、零拷贝回退等），nil 表示不输出
 	Logger *slog.Logger
 
+	// Backend 选择事件循环的实现，默认 BackendAuto（io_uring 不可用时退回 epoll）
+	Backend Backend
+
 	index      int
 	entries    uint32
 	ownsSocket bool // SocketFd 是否由本实例独占（ReusePort 时每个实例一个监听 socket）
 
 	h        connHandler // 回调：旧 API 时包装 Handler，新 API 时包装 Server 的 Handler
 	log      *slog.Logger
-	loop     *iouring.Loop
-	br       *iouring.BufferRing
+	loop     eventLoop
+	br       bufRing
+	backend  Backend // 实际使用的后端
 	ringloop *Ringloop
 
 	// 以下字段仅在 Loop 线程中访问
@@ -389,11 +393,42 @@ func (rn *URingNet) start(bufferCount int) error {
 	if rn.log == nil {
 		rn.log = discardLogger
 	}
-	if err := checkKernel(); err != nil {
-		return err
-	}
 	if rn.BufferSize <= 0 {
 		rn.BufferSize = DefaultBufferSize
+	}
+	backend := rn.Backend
+	if backend == BackendAuto {
+		backend = defaultBackend
+	}
+	if backend != BackendEpoll {
+		err := rn.startURing(bufferCount)
+		switch {
+		case err == nil:
+			rn.backend = BackendIOUring
+			return rn.finishStart()
+		case backend == BackendAuto && ioURingUnavailable(err):
+			rn.log.Warn("uringnet: io_uring unavailable, falling back to epoll (zero-copy send, recv bundles and "+
+				"incremental buffers are disabled)", "ring", rn.index, "err", err)
+		default:
+			return err
+		}
+	}
+	l, err := newEpollLoop(bufferCount, rn.BufferSize)
+	if err != nil {
+		return fmt.Errorf("%w: epoll: %v", errors.ErrRingSetup, err)
+	}
+	rn.loop, rn.br = l, l.BufferRing()
+	rn.backend = BackendEpoll
+	rn.maxHeld = bufferCount / 2
+	rn.fixedIdx = -1
+	rn.zcOff = true // epoll 没有零拷贝发送
+	return rn.finishStart()
+}
+
+// startURing 创建 io_uring 事件循环，按需退回不支持的功能
+func (rn *URingNet) startURing(bufferCount int) error {
+	if err := checkKernel(); err != nil {
+		return err
 	}
 	cfg := iouring.LoopConfig{
 		Entries: rn.entries,
@@ -404,25 +439,24 @@ func (rn *URingNet) start(bufferCount int) error {
 		SpinBusyBatch: rn.SpinBusyBatch,
 		SpinIdleBatch: rn.SpinIdleBatch,
 	}
-	l, err := iouring.NewLoop(cfg)
+	l, err := newURingLoop(cfg)
 	if err != nil && cfg.BufferRings[0].Incremental && !unavailable(err) {
 		// 内核不支持增量消费（6.12 之前），退回普通 buffer ring
 		rn.log.Info("uringnet: incremental buffers not supported, using a normal buffer ring", "ring", rn.index, "err", err)
 		cfg.BufferRings[0].Incremental = false
-		l, err = iouring.NewLoop(cfg)
+		l, err = newURingLoop(cfg)
 	}
 	if err != nil && cfg.BufferRings[0].Fixed && !unavailable(err) {
 		// 注册固定缓冲区失败（通常是 RLIMIT_MEMLOCK 不足），退回不注册：SEND_ZC 仍可用，只是逐次 pin 页
 		rn.log.Info("uringnet: cannot register receive buffers as fixed buffers (RLIMIT_MEMLOCK?), zero-copy sends will pin pages per send",
 			"ring", rn.index, "err", err)
 		cfg.BufferRings[0].Fixed = false
-		l, err = iouring.NewLoop(cfg)
+		l, err = newURingLoop(cfg)
 	}
 	if err != nil {
 		return setupError(err)
 	}
-	rn.loop = l
-	rn.br = l.BufferRing(0)
+	rn.loop, rn.br = l, l.BufferRing()
 	rn.maxHeld = bufferCount / 2
 	if cfg.BufferRings[0].Incremental {
 		rn.inc = true
@@ -435,6 +469,11 @@ func (rn *URingNet) start(bufferCount int) error {
 	rn.bundle = !rn.inc && l.Features()&iouring_syscall.IORING_FEAT_RECVSEND_BUNDLE != 0 &&
 		(rn.RecvBundle == BundleOn || (rn.RecvBundle == BundleAuto && bundleSafeKernel()))
 	rn.fixedIdx = rn.br.FixedIndex()
+	return nil
+}
+
+// finishStart 是两种后端共同的初始化
+func (rn *URingNet) finishStart() error {
 	rn.conns = make(map[int]*conn)
 	rn.maxWrite = rn.MaxWriteBuffer
 	if rn.maxWrite == 0 {
@@ -481,7 +520,7 @@ func (rn *URingNet) armAccept() {
 		return
 	}
 	rn.acceptArms++
-	rn.loop.AcceptMultishot(rn.SocketFd, unix.SOCK_CLOEXEC, rn.onAccept)
+	rn.loop.AcceptMultishot(rn.SocketFd, rn.onAccept)
 }
 
 func (rn *URingNet) onAccept(res int32, flags uint32) {

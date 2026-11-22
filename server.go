@@ -61,6 +61,7 @@ type options struct {
 	reusePort      bool
 	noDelay        bool
 	logger         *slog.Logger
+	backend        Backend
 }
 
 // WithRings sets the number of event loops (default runtime.NumCPU()). Each has its own
@@ -127,6 +128,10 @@ func WithReusePort(on bool) Option { return func(o *options) { o.reusePort = on 
 // WithTCPNoDelay sets TCP_NODELAY on accepted connections (default true).
 func WithTCPNoDelay(on bool) Option { return func(o *options) { o.noDelay = on } }
 
+// WithBackend selects the event loop implementation (default BackendAuto: io_uring, or
+// epoll when io_uring is unavailable).
+func WithBackend(b Backend) Option { return func(o *options) { o.backend = b } }
+
 // WithLogger receives warnings about failures the server recovers from (accept errors,
 // zero-copy fallback) and debug messages (timeouts). By default nothing is logged.
 func WithLogger(l *slog.Logger) Option { return func(o *options) { o.logger = l } }
@@ -149,9 +154,6 @@ func newServer(network, address string, h Handler, opts []Option) (*Server, erro
 		reusePort: true, noDelay: true}
 	for _, opt := range opts {
 		opt(&o)
-	}
-	if err := checkKernel(); err != nil {
-		return nil, err
 	}
 	// Unix socket 不支持 SO_REUSEPORT（所有 ring 共享一个监听 socket）
 	sockOpts := socket.SocketOptions{ReusePort: o.reusePort && network != "unix"}
@@ -195,6 +197,7 @@ func newServer(network, address string, h Handler, opts []Option) (*Server, erro
 		rn.WriteTimeout = o.writeTimeout
 		rn.Logger = s.log
 		rn.noDelay = o.noDelay
+		rn.Backend = o.backend
 	}
 	if rings[0].SocketFd >= 0 {
 		if sa, err := unix.Getsockname(rings[0].SocketFd); err == nil {
@@ -219,6 +222,9 @@ func closeListeners(rings []*URingNet) {
 		}
 	}
 }
+
+// Backend returns the backend the event loops use: BackendIOUring or BackendEpoll.
+func (s *Server) Backend() Backend { return s.rings[0].backend }
 
 // Addr returns the listening address (with the actual port when listening on port 0).
 func (s *Server) Addr() net.Addr { return s.addr }

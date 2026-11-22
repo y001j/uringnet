@@ -41,7 +41,7 @@ io_uring 带来的是少得多的系统调用（高负载下每个请求低至 0
 
 UringNet 是为物联网网关设计的：连接多、消息小、请求/响应式的流量。它支持 TCP、Unix 流式套接字和 UDP（暂不支持 TLS），以及拨出连接和消息分帧。满足以下条件时可以考虑使用：
 
-- 运行 Linux 6.0+（recv bundle 需要 6.16+），并且主机允许使用 io_uring（Docker 和 Kubernetes 默认的 seccomp 配置会禁用它）；
+- 运行 Linux 6.0+（recv bundle 需要 6.16+），并且主机允许使用 io_uring（Docker 和 Kubernetes 默认的 seccomp 配置会禁用它；没有 io_uring 时会回退到 epoll，能运行，但失去了大部分优势）；
 - 你在意延迟或系统调用开销，并且能为忙轮询留出一些 CPU。
 
 否则，更成熟的方案如 Go 的 [net](https://golang.org/pkg/net/)/[http](https://pkg.go.dev/net/http)、[gnet](https://github.com/panjf2000/gnet)、[netty](https://netty.io/) 或 [libuv](https://github.com/libuv/libuv) 是更稳妥的选择。它们支持更多平台和内核，并且已经在生产环境中运行多年。
@@ -131,6 +131,7 @@ func main() {
 | `WithIdleTimeout(d)` | 连接在 `d` 内既没收到也没发出数据就关闭 |
 | `WithWriteTimeout(d)` | 发送队列在 `d` 内没有任何进展（例如对端不再读取）就关闭连接 |
 | `WithReusePort(on)` / `WithTCPNoDelay(on)` | 每个 ring 一个开启 `SO_REUSEPORT` 的监听套接字（默认开启）/ `TCP_NODELAY`（默认开启） |
+| `WithBackend(b)` | `BackendAuto`（默认）：使用 io_uring，不可用时回退到 epoll；`BackendIOUring` 或 `BackendEpoll` 强制使用其中一种。`Server.Backend()` 返回实际使用的后端 |
 | `WithLogger(*slog.Logger)` | 输出服务能自行恢复的异常（accept 失败、零拷贝回退）的警告，以及超时等调试信息；默认不输出 |
 
 **Handler 和 Conn**
@@ -387,7 +388,9 @@ python3 bench/scripts/summarize.py r.txt epoll
 
 > **警告：** 本项目仍在开发中。如果发现任何问题或有任何建议，欢迎提交 issue。
 
-- 需要 Linux 6.0+ 并启用 io_uring。Docker 默认的 seccomp 配置和 Kubernetes 的 `RuntimeDefault` 会禁用 io_uring，Linux 6.6+ 还可以通过 `kernel.io_uring_disabled` 关闭它。目前没有回退到 epoll 的机制。
+- io_uring 需要 Linux 6.0+ 并且未被禁用：Docker 默认的 seccomp 配置和 Kubernetes 的 `RuntimeDefault` 会禁用它，Linux 6.6+ 还可以通过
+  `kernel.io_uring_disabled` 关闭它。这些情况下服务会自动回退到 epoll（输出一条警告），旧内核上也能运行，但没有零拷贝发送、
+  recv bundle 和增量缓冲区，性能也较低（压测中是手写 epoll 循环的 0.77–1.18 倍）。`WithBackend(BackendIOUring)` 可以禁止回退。
 - 对没有 `CAP_IPC_LOCK` 权限的进程，io_uring 的环形队列按用户计入 `RLIMIT_MEMLOCK`：默认 SQ 大小 512 时每个 ring 约 70KB
   （4096 时约 550KB），开启零拷贝时注册的接收缓冲区也计算在内。常见的 8MB 上限下大约能建 110 个 ring。如果 `Listen`
   报 “out of locked memory”，请调大 `ulimit -l`（systemd 服务用 `LimitMEMLOCK=`），或减少 ring 数量。

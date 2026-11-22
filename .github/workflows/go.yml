@@ -30,6 +30,9 @@ jobs:
     - name: Test
       run: go test -race -count=1 -coverprofile=coverage.out -covermode=atomic ./...
 
+    - name: Test (epoll backend)
+      run: URINGNET_BACKEND=epoll go test -race -count=1 ./...
+
     - name: Build examples
       run: go build ./example/...
 

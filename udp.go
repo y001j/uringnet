@@ -74,9 +74,6 @@ func ListenPacket(network, address string, h PacketHandler, opts ...Option) (*Pa
 	if o.rings <= 0 {
 		return nil, fmt.Errorf("uringnet: invalid number of rings %d", o.rings)
 	}
-	if err := checkKernel(); err != nil {
-		return nil, err
-	}
 	reuse := o.reusePort && o.rings > 1
 	s := &PacketServer{}
 	log := o.logger
@@ -105,7 +102,7 @@ func ListenPacket(network, address string, h PacketHandler, opts ...Option) (*Pa
 		}
 		rn := &URingNet{SocketFd: fd, index: i, entries: uint32(o.sqSize), ownsSocket: reuse, packet: true,
 			BufferSize: o.bufSize, SpinTime: o.spin, SpinFixed: o.spinFixed, SpinBusyBatch: o.spinBusy,
-			SpinIdleBatch: o.spinIdle, Logger: log, RecvBundle: BundleOff}
+			SpinIdleBatch: o.spinIdle, Logger: log, RecvBundle: BundleOff, Backend: o.backend}
 		rn.h = packetHandler{}
 		rn.ph = h
 		rn.pc.rn = rn
@@ -136,6 +133,9 @@ func (s *PacketServer) closeSockets() {
 
 // Addr returns the local address (with the actual port when bound to port 0).
 func (s *PacketServer) Addr() net.Addr { return s.addr }
+
+// Backend returns the backend the event loops use: BackendIOUring or BackendEpoll.
+func (s *PacketServer) Backend() Backend { return s.rings[0].backend }
 
 // Serve starts receiving and blocks until Close; it returns ErrServerClosed.
 func (s *PacketServer) Serve() error {
@@ -227,12 +227,7 @@ func (rn *URingNet) armRecvMsg() {
 		return
 	}
 	rn.recvMsg = unix.Msghdr{Namelen: packetNameLen}
-	rn.loop.Prep(func(sqe *iouring_syscall.SubmissionQueueEntry) {
-		sqe.PrepOperation(iouring_syscall.IORING_OP_RECVMSG, int32(rn.SocketFd), uint64(uintptr(unsafe.Pointer(&rn.recvMsg))), 1, 0)
-		sqe.SetIoprio(iouring_syscall.IORING_RECV_MULTISHOT)
-		sqe.SetFlags(iouring_syscall.IOSQE_FLAGS_BUFFER_SELECT)
-		sqe.SetBufGroup(0) // Loop 按下标分配组号，这里只有第 0 个 buffer ring
-	}, nil, rn.onRecvMsg)
+	rn.loop.RecvMsgMultishot(rn.SocketFd, &rn.recvMsg, rn.onRecvMsg)
 }
 
 func (rn *URingNet) onRecvMsg(res int32, flags uint32) {
@@ -343,9 +338,7 @@ func (rn *URingNet) sendTo(b []byte, to netip.AddrPort, done func(error)) error 
 	msg.Iov = iov
 	msg.SetIovlen(1)
 	n := len(b)
-	rn.loop.Prep(func(sqe *iouring_syscall.SubmissionQueueEntry) {
-		sqe.PrepOperation(iouring_syscall.IORING_OP_SENDMSG, int32(rn.SocketFd), uint64(uintptr(unsafe.Pointer(msg))), 1, 0)
-	}, mem, func(res int32, _ uint32) {
+	rn.loop.Sendmsg(rn.SocketFd, msg, mem, func(res int32, _ uint32) {
 		var err error
 		if res < 0 {
 			err = syscall.Errno(-res)

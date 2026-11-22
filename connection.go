@@ -94,11 +94,7 @@ func newConn(rn *URingNet, fd int) *conn {
 
 func (c *conn) armRecv() {
 	c.recvActive = true
-	if c.rn.bundle {
-		c.recvUD = c.rn.loop.RecvMultishotBundle(c.fd, c.rn.br, 0, c.onRecvH)
-	} else {
-		c.recvUD = c.rn.loop.RecvMultishot(c.fd, c.rn.br, 0, c.onRecvH)
-	}
+	c.recvUD = c.rn.loop.RecvMultishot(c.fd, c.rn.bundle, c.onRecvH)
 }
 
 // checkBackpressure 在回调结束后检查发送队列：超过上限时暂停接收（取消 multishot recv）。
@@ -111,7 +107,7 @@ func (c *conn) checkBackpressure() {
 	c.paused = true
 	c.rn.pauses++
 	if c.recvActive {
-		c.rn.loop.Cancel(c.recvUD, c.rn.nopH)
+		c.rn.loop.Cancel(c.recvUD)
 	}
 }
 
@@ -347,11 +343,11 @@ func (c *conn) sendHead() {
 	if s.zc != nil && rn.zcEnabled() {
 		s.zc.n++
 		h := c.zcHandler(s.zc)
-		if s.bid >= 0 && rn.fixedIdx >= 0 {
-			rn.loop.SendZCFixed(c.fd, s.b[c.off:], uint16(rn.fixedIdx), unix.MSG_NOSIGNAL, 0, h)
-		} else {
-			rn.loop.SendZC(c.fd, s.b[c.off:], unix.MSG_NOSIGNAL, 0, h)
+		fixed := -1
+		if s.bid >= 0 {
+			fixed = rn.fixedIdx
 		}
+		rn.loop.SendZC(c.fd, s.b[c.off:], fixed, h)
 		rn.zcSends++
 		c.inflight = 1
 		return
@@ -372,12 +368,12 @@ func (c *conn) sendHead() {
 	}
 	c.inflight = n
 	if n == 1 {
-		rn.loop.Send(c.fd, s.b[c.off:], unix.MSG_NOSIGNAL, c.onSendH)
+		rn.loop.Send(c.fd, s.b[c.off:], c.onSendH)
 		return
 	}
 	c.msg = unix.Msghdr{Iov: &c.iov[0]}
 	c.msg.SetIovlen(n)
-	rn.loop.Sendmsg(c.fd, &c.msg, unix.MSG_NOSIGNAL, c.onSendH)
+	rn.loop.Sendmsg(c.fd, &c.msg, nil, c.onSendH)
 	rn.gatherSends++
 }
 

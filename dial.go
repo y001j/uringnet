@@ -11,7 +11,6 @@ import (
 	"syscall"
 	"unsafe"
 
-	iouring_syscall "github.com/y001j/iouring-go/syscall"
 	"golang.org/x/sys/unix"
 )
 
@@ -86,7 +85,7 @@ func (s *Server) Dial(ctx context.Context, network, address string, connCtx inte
 			return
 		}
 		req.cancelled = true
-		rn.loop.Cancel(req.ud, rn.nopH)
+		rn.loop.Cancel(req.ud)
 		abandoned <- true
 	}) != nil {
 		return nil, ctx.Err()
@@ -186,10 +185,7 @@ func (rn *URingNet) connect(sa unix.Sockaddr, domain int, req *dialReq) {
 		req.done(nil, err)
 		return
 	}
-	req.ud = rn.loop.Prep(func(sqe *iouring_syscall.SubmissionQueueEntry) {
-		// connect：addr 为 sockaddr，off 为其长度
-		sqe.PrepOperation(iouring_syscall.IORING_OP_CONNECT, int32(fd), uint64(uintptr(unsafe.Pointer(&raw[0]))), 0, uint64(len(raw)))
-	}, raw, func(res int32, _ uint32) {
+	req.ud = rn.loop.Connect(fd, raw, func(res int32, _ uint32) {
 		req.finished = true
 		switch {
 		case req.cancelled:

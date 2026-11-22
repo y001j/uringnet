@@ -6,7 +6,7 @@
 
 **进度**（已完成的标记为 ✅）：
 - 第一阶段（第 1、2、3、7 项）：2026-11-22 完成，包含在 `v0.1.0-alpha` 中。
-- 第二阶段：第 4、5、8、9、10、11、19 项已完成（2026-11-22，分支 `feat/phase2-api`）；第 5 项中的 epoll 回退没有做。
+- 第二阶段：第 4、5、8、9、10、11、19 项已完成（2026-11-22，分支 `feat/phase2-api`）；第 5 项中的 epoll 回退已完成（BackendAuto/BackendEpoll）。
 - 第 20、21 项：随 v0.1.0 发布完成（iouring-go v0.1.0、x/sys v0.30.0、CHANGELOG）。
 - 第 6 项：模糊测试和压力测试已加入；顺带发现并修复了默认 SQ 过大导致多核机器上锁定内存不足的问题。
 - 第 12、13、15 项：拨出连接（Dial/DialAsync/NewClient）、UDP（ListenPacket）、分帧（Framed）已完成。
@@ -44,7 +44,7 @@
 - **要做的**：先停止 accept，等在途的发送完成或超时，再关闭连接和环；提供 `Shutdown(ctx context.Context) error`。
 - **验收**：关闭过程中已经发出的响应不会丢失。
 
-### 5. 启动检查和回退 · P1 ✅
+### 5. 启动检查和回退 · P1 ✅（含 epoll 回退）
 - **现状**：io_uring 被禁用（seccomp、`kernel.io_uring_disabled`）、`RLIMIT_MEMLOCK` 不足、内核版本太低时，只返回一个笼统的错误。
 - **要做的**：
   - 启动时逐项检测，给出明确的报错和解决办法。
