@@ -39,7 +39,7 @@ io_uring 带来的是少得多的系统调用（高负载下每个请求低至 0
 
 ### 是否适合你的项目
 
-UringNet 是为物联网网关设计的：连接多、消息小、请求/响应式的流量。它支持 TCP 和 Unix 流式套接字（暂不支持 UDP 和 TLS）。满足以下条件时可以考虑使用：
+UringNet 是为物联网网关设计的：连接多、消息小、请求/响应式的流量。它支持 TCP、Unix 流式套接字和 UDP（暂不支持 TLS），以及拨出连接和消息分帧。满足以下条件时可以考虑使用：
 
 - 运行 Linux 6.0+（recv bundle 需要 6.16+），并且主机允许使用 io_uring（Docker 和 Kubernetes 默认的 seccomp 配置会禁用它）；
 - 你在意延迟或系统调用开销，并且能为忙轮询留出一些 CPU。
@@ -157,6 +157,33 @@ func main() {
 - 对端关闭写方向（半关闭）后，已写入的数据仍会发完再关闭连接。
 
 旧的 API（`NewMany`、`SetLoops`、`EventHandler`、`UserData`）仍然可用，但已标记为弃用。
+
+### 拨出连接
+
+`Server.Dial(ctx, network, address, connCtx)` 从服务的某个事件循环发起连接（使用 `IORING_OP_CONNECT`），在 `OnOpen`
+执行完后返回 `*Conn`；`connCtx` 会在 `OnOpen` 之前设为连接的 Context，回调里据此可以区分拨出的连接。`Dial` 会阻塞，
+在回调中请用 `DialAsync`，结果通过事件循环上的回调返回。`Conn.DialAsync` 在已有连接所在的同一个事件循环上拨号，
+两个连接可以在回调中直接互相写入，代理需要的就是这个（见 `ExampleConn_DialAsync`）。只拨号、不监听的程序用
+`NewClient(handler, opts...)`。
+
+### 分帧（编解码）
+
+`Framed(framer, handler)` 把字节流切成消息：每个完整的帧调用一次 `OnMessage(c, msg)`。完整到达的帧直接把接收缓冲区
+交给回调（原样写回就是原地发送）；不完整的帧按连接缓存，等后续数据到齐。内置 `NewLengthField(头部字节数, 字节序, 最大负载)`、
+`NewDelimiter(分隔符, 最大帧长)` 和 `FixedLength(n)`，都可以用 `AppendFrame` 构造要发送的帧；其他格式实现 `Framer` 接口即可。
+超长的帧会以 `ErrFrameTooLarge` 关闭连接。
+
+```go
+framer := uringnet.NewLengthField(2, binary.BigEndian, 64<<10)
+srv, err := uringnet.Listen("tcp", ":9000", uringnet.Framed(framer, handler)) // handler 实现 OnMessage
+```
+
+### UDP
+
+`ListenPacket("udp", address, handler, opts...)` 为每个 ring 打开一个开启 `SO_REUSEPORT` 的 socket，用 multishot `recvmsg`
+接收到 provided buffer ring。`OnPacket(pc, data, from)` 收到的来源地址是 `netip.AddrPort`，接收过程不分配内存；用
+`pc.WriteTo` 回复，或在任意 goroutine 中用 `AsyncWriteTo` 发送。接收缓冲区要能放下整个数据报再加约 48 字节，更大的数据报
+会被丢弃并计入 `Stats.PacketsTruncated`。绑定端口 0 并用 `Start` 启动时，`PacketServer` 也可以当作 UDP 客户端使用。
 
 ### 接收缓冲区的数量
 
@@ -364,6 +391,6 @@ python3 bench/scripts/summarize.py r.txt epoll
 - 对没有 `CAP_IPC_LOCK` 权限的进程，io_uring 的环形队列按用户计入 `RLIMIT_MEMLOCK`：默认 SQ 大小 512 时每个 ring 约 70KB
   （4096 时约 550KB），开启零拷贝时注册的接收缓冲区也计算在内。常见的 8MB 上限下大约能建 110 个 ring。如果 `Listen`
   报 “out of locked memory”，请调大 `ulimit -l`（systemd 服务用 `LimitMEMLOCK=`），或减少 ring 数量。
-- 只支持流式套接字（TCP、Unix），不支持 UDP 和 TLS。
+- 不支持 TLS。
 - recv bundle 需要 Linux 6.16+ 才能保证数据正确（见 *Recv bundle*）。
 - accept 失败（例如 `EMFILE`）时会按指数退避重试（5ms 起，最长 1s），并通过 `WithLogger` 输出日志。

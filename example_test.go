@@ -5,10 +5,12 @@ package uringnet_test
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"expvar"
 	"log"
 	"log/slog"
+	"net/netip"
 	"os"
 	"os/signal"
 	"syscall"
@@ -126,5 +128,109 @@ func ExampleServer_Stats() {
 		log.Fatal(err)
 	}
 	expvar.Publish("uringnet", expvar.Func(func() any { return srv.Stats() }))
+	srv.Serve()
+}
+
+// frameEcho answers every length-prefixed frame with the same frame.
+type frameEcho struct{ uringnet.BuiltinHandler }
+
+func (frameEcho) OnMessage(c *uringnet.Conn, msg []byte) uringnet.Action {
+	c.Write(msg) // a frame that arrived in one piece is sent back in place
+	return uringnet.None
+}
+
+// A server for frames with a 2-byte big-endian length header, payload up to 64KB.
+// Partial frames are buffered per connection; OnMessage sees whole frames only.
+func ExampleFramed() {
+	framer := uringnet.NewLengthField(2, binary.BigEndian, 64<<10)
+	srv, err := uringnet.Listen("tcp", ":9000", uringnet.Framed(framer, frameEcho{}))
+	if err != nil {
+		log.Fatal(err)
+	}
+	srv.Serve()
+}
+
+// tcpProxy forwards every accepted connection to an upstream server. Conn.DialAsync puts
+// the upstream connection on the same event loop, so the two can write to each other
+// directly from their callbacks.
+type tcpProxy struct {
+	uringnet.BuiltinHandler
+	upstream string
+}
+
+type side struct {
+	peer    *uringnet.Conn
+	pending []byte // data from the client before the upstream connection is up
+}
+
+func (p *tcpProxy) OnOpen(c *uringnet.Conn) uringnet.Action {
+	if c.Context() != nil {
+		return uringnet.None // the upstream connection: its context is set before OnOpen
+	}
+	down := &side{}
+	c.SetContext(down)
+	c.DialAsync("tcp", p.upstream, &side{peer: c}, func(up *uringnet.Conn, err error) {
+		if err != nil {
+			c.Close()
+			return
+		}
+		down.peer = up
+		up.Write(down.pending)
+		down.pending = nil
+	})
+	return uringnet.None
+}
+
+func (p *tcpProxy) OnTraffic(c *uringnet.Conn, data []byte) uringnet.Action {
+	s := c.Context().(*side)
+	if s.peer == nil {
+		s.pending = append(s.pending, data...)
+	} else {
+		s.peer.Write(data)
+	}
+	return uringnet.None
+}
+
+func (p *tcpProxy) OnClose(c *uringnet.Conn, err error) {
+	if s, ok := c.Context().(*side); ok && s.peer != nil {
+		s.peer.Close()
+	}
+}
+
+// A TCP proxy from :8080 to 127.0.0.1:9000.
+func ExampleConn_DialAsync() {
+	srv, err := uringnet.Listen("tcp", ":8080", &tcpProxy{upstream: "127.0.0.1:9000"})
+	if err != nil {
+		log.Fatal(err)
+	}
+	srv.Serve()
+}
+
+// A client: connections are dialed and then handled with the same callbacks as a server's.
+func ExampleNewClient() {
+	cl, err := uringnet.NewClient(echo{}, uringnet.WithRings(1))
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer cl.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	c, err := cl.Dial(ctx, "tcp", "127.0.0.1:9000", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	c.AsyncWrite([]byte("hello"), nil)
+}
+
+// A UDP echo server. The source address is a netip.AddrPort, so receiving allocates nothing.
+func ExampleListenPacket() {
+	srv, err := uringnet.ListenPacket("udp", ":5683",
+		uringnet.PacketHandlerFunc(func(pc *uringnet.PacketConn, data []byte, from netip.AddrPort) {
+			pc.WriteTo(data, from)
+		}),
+		uringnet.WithBuffers(256, 2048)) // datagrams up to about 2000 bytes
+	if err != nil {
+		log.Fatal(err)
+	}
 	srv.Serve()
 }
