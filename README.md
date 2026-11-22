@@ -1,8 +1,9 @@
 # UringNet
 
-[![Go Report Card](https://goreportcard.com/badge/github.com/y001j/UringNet)](https://goreportcard.com/report/github.com/y001j/UringNet)
 [![Build](https://github.com/y001j/uringnet/actions/workflows/go.yml/badge.svg?branch=master)](https://github.com/y001j/uringnet/actions/workflows/go.yml)
-[![GoDoc](https://godoc.org/github.com/y001j/uringnet?status.svg)](https://pkg.go.dev/github.com/y001j/uringnet)
+[![Go Reference](https://pkg.go.dev/badge/github.com/y001j/uringnet.svg)](https://pkg.go.dev/github.com/y001j/uringnet)
+[![Go version](https://img.shields.io/github/go-mod/go-version/y001j/uringnet)](go.mod)
+[![License](https://img.shields.io/github/license/y001j/uringnet)](LICENSE)
 
 ## Introduction
 
