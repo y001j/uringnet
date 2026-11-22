@@ -5,6 +5,7 @@ package uringnet
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"sync/atomic"
@@ -68,7 +69,7 @@ func (s *Server) Dial(ctx context.Context, network, address string, connCtx inte
 	}
 	rn := s.pickRing()
 	results := make(chan result, 1)
-	req := &dialReq{connCtx: connCtx, done: func(c *conn, err error) { results <- result{c, err} }}
+	req := &dialReq{connCtx: connCtx, host: hostOf(address), done: func(c *conn, err error) { results <- result{c, err} }}
 	if err := rn.Post(func() { rn.connect(sa, domain, req) }); err != nil {
 		return nil, ErrServerClosed
 	}
@@ -127,7 +128,7 @@ func (rn *URingNet) dialAsync(network, address string, connCtx interface{}, done
 			rn.Post(func() { finish(nil, err) })
 			return
 		}
-		req := &dialReq{connCtx: connCtx, done: finish}
+		req := &dialReq{connCtx: connCtx, host: hostOf(address), done: finish}
 		if rn.Post(func() { rn.connect(sa, domain, req) }) != nil && done != nil {
 			done(nil, ErrServerClosed) // the event loop is closed: there is no other thread to report on
 		}
@@ -154,6 +155,7 @@ type dialReq struct {
 	ud        uint64 // user_data of the connect request, to cancel it
 	finished  bool   // connect has completed
 	cancelled bool   // the caller gave up: drop the result
+	host      string // host part of the address, the TLS server name by default
 }
 
 var dialRing atomic.Uint32
@@ -198,10 +200,30 @@ func (rn *URingNet) connect(sa unix.Sockaddr, domain int, req *dialReq) {
 			req.done(nil, ErrServerClosed)
 		default:
 			rn.dialed++
-			c := rn.openConn(fd, req.connCtx)
-			req.done(c, nil) // OnOpen may have closed the connection already; writes then return ErrConnClosed
+			rn.openConn(fd, req.connCtx, rn.dialTLS(req.host), true, req.done)
 		}
 	})
+}
+
+// dialTLS returns the TLS config for a dialed connection, or nil without WithDialTLS. Without a
+// ServerName in the config, the host being dialed is used.
+func (rn *URingNet) dialTLS(host string) *tls.Config {
+	cfg := rn.tlsClient
+	if cfg == nil || cfg.ServerName != "" || cfg.InsecureSkipVerify || host == "" {
+		return cfg
+	}
+	cfg = cfg.Clone()
+	cfg.ServerName = host
+	return cfg
+}
+
+func hostOf(address string) string {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return ""
+	}
+	h, _, _ := cutZone(host)
+	return h
 }
 
 // resolveDial resolves an address to a sockaddr and address family.

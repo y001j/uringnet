@@ -4,6 +4,7 @@
 package uringnet
 
 import (
+	"crypto/tls"
 	stderrors "errors"
 	"net"
 
@@ -105,7 +106,7 @@ func (cn *Conn) Close() error {
 	if c.closed {
 		return ErrConnClosed
 	}
-	c.closeAfterFlush()
+	c.closeGracefully()
 	return nil
 }
 
@@ -130,6 +131,15 @@ func (cn *Conn) AsyncWrite(b []byte, done func(error)) error {
 // from any goroutine.
 func (cn *Conn) AsyncClose() error {
 	return cn.c.rn.Post(func() { cn.Close() })
+}
+
+// TLSConnectionState returns the TLS state of a TLS connection (WithTLS, WithDialTLS); ok is false
+// for plain connections.
+func (cn *Conn) TLSConnectionState() (state tls.ConnectionState, ok bool) {
+	if cn.c.tls == nil || !cn.c.tls.ready {
+		return tls.ConnectionState{}, false
+	}
+	return cn.c.tls.tc.ConnectionState(), true
 }
 
 // Context returns the value set with SetContext.
@@ -183,7 +193,7 @@ func (a apiHandler) closed(c *conn) { a.h.OnClose(&c.api, c.err) }
 func (c *conn) apiAction(action Action, s *Server) {
 	switch action {
 	case Close, EchoAndClose:
-		c.closeAfterFlush()
+		c.closeGracefully()
 	case Shutdown:
 		go s.Close()
 	}

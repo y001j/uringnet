@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/). Before v1.0.0, minor versions may change the API.
 
+## [Unreleased]
+
+### Added
+- epoll backend: `WithBackend`, `Backend` (`BackendAuto` falls back to epoll when io_uring is unavailable, with a
+  warning; `BackendIOUring`, `BackendEpoll`), `Server.Backend`, `PacketServer.Backend`.
+- TLS: `WithTLS`, `WithDialTLS`, `Conn.TLSConnectionState`, `Stats.TLSHandshakeErrors`.
+- `docs/ARCHITECTURE.md`; all code comments are in English.
+
 ## [v0.2.0] - 2026-11-22
 
 Adds outgoing connections, UDP and message framing. No breaking changes: code written for v0.1.0

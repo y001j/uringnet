@@ -39,7 +39,7 @@ io_uring 带来的是少得多的系统调用（高负载下每个请求低至 0
 
 ### 是否适合你的项目
 
-UringNet 是为物联网网关设计的：连接多、消息小、请求/响应式的流量。它支持 TCP、Unix 流式套接字和 UDP（暂不支持 TLS），以及拨出连接和消息分帧。满足以下条件时可以考虑使用：
+UringNet 是为物联网网关设计的：连接多、消息小、请求/响应式的流量。它支持 TCP、Unix 流式套接字和 UDP、TLS，以及拨出连接和消息分帧。满足以下条件时可以考虑使用：
 
 - 运行 Linux 6.0+（recv bundle 需要 6.16+），并且主机允许使用 io_uring（Docker 和 Kubernetes 默认的 seccomp 配置会禁用它；没有 io_uring 时会回退到 epoll，能运行，但失去了大部分优势）；
 - 你在意延迟或系统调用开销，并且能为忙轮询留出一些 CPU。
@@ -131,6 +131,7 @@ func main() {
 | `WithIdleTimeout(d)` | 连接在 `d` 内既没收到也没发出数据就关闭 |
 | `WithWriteTimeout(d)` | 发送队列在 `d` 内没有任何进展（例如对端不再读取）就关闭连接 |
 | `WithReusePort(on)` / `WithTCPNoDelay(on)` | 每个 ring 一个开启 `SO_REUSEPORT` 的监听套接字（默认开启）/ `TCP_NODELAY`（默认开启） |
+| `WithTLS(cfg)` / `WithDialTLS(cfg)` | 接入 / 拨出的连接使用 TLS，见下文 *TLS* |
 | `WithBackend(b)` | `BackendAuto`（默认）：使用 io_uring，不可用时回退到 epoll；`BackendIOUring` 或 `BackendEpoll` 强制使用其中一种。`Server.Backend()` 返回实际使用的后端 |
 | `WithLogger(*slog.Logger)` | 输出服务能自行恢复的异常（accept 失败、零拷贝回退）的警告，以及超时等调试信息；默认不输出 |
 
@@ -180,6 +181,14 @@ func main() {
 framer := uringnet.NewLengthField(2, binary.BigEndian, 64<<10)
 srv, err := uringnet.Listen("tcp", ":9000", uringnet.Framed(framer, handler)) // handler 实现 OnMessage
 ```
+
+### TLS
+
+`WithTLS(cfg)` 让接入的连接使用 TLS，`WithDialTLS(cfg)` 让拨出的连接使用 TLS（默认用拨号的主机名做服务器名校验）。回调看到的都是明文：
+`OnOpen` 在握手成功后才调用（握手失败的连接直接关闭，不调用 `OnOpen`/`OnClose`，计入 `Stats.TLSHandshakeErrors`），`Write`
+负责加密，`Close` 会发送 `close_notify`。`Conn.TLSConnectionState` 返回协商结果。实现基于 `crypto/tls`：握手在单独的 goroutine
+中完成，之后的加解密都在事件循环里进行。压测中 128 字节消息的吞吐是 `crypto/tls` 服务端的 0.93–1.24 倍，16KB 消息是 0.8 倍
+（服务端 1 核）；TLS 连接不使用原地发送和零拷贝。
 
 ### UDP
 
@@ -396,6 +405,5 @@ python3 bench/scripts/summarize.py r.txt epoll
 - 对没有 `CAP_IPC_LOCK` 权限的进程，io_uring 的环形队列按用户计入 `RLIMIT_MEMLOCK`：默认 SQ 大小 512 时每个 ring 约 70KB
   （4096 时约 550KB），开启零拷贝时注册的接收缓冲区也计算在内。常见的 8MB 上限下大约能建 110 个 ring。如果 `Listen`
   报 “out of locked memory”，请调大 `ulimit -l`（systemd 服务用 `LimitMEMLOCK=`），或减少 ring 数量。
-- 不支持 TLS。
 - recv bundle 需要 Linux 6.16+ 才能保证数据正确（见 *Recv bundle*）。
 - accept 失败（例如 `EMFILE`）时会按指数退避重试（5ms 起，最长 1s），并通过 `WithLogger` 输出日志。

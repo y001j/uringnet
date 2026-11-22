@@ -46,7 +46,7 @@ submits a whole batch of requests and waits for a batch of results.
 ### Should You adopt it in your project
 
 UringNet was designed for IoT gateways: many connections, small messages, request/response traffic. It provides TCP, Unix
-stream sockets and UDP (no TLS yet), outgoing connections and message framing. Consider it if:
+stream sockets and UDP, TLS, outgoing connections and message framing. Consider it if:
 
 - you run Linux 6.0+ (6.16+ for recv bundles) and io_uring is allowed on the host (it is blocked by Docker's and Kubernetes'
   default seccomp profiles; without io_uring uringnet falls back to epoll, which works but loses most of the advantage), and
@@ -142,6 +142,7 @@ func main() {
 | `WithIdleTimeout(d)` | close connections that neither receive nor send data for `d` |
 | `WithWriteTimeout(d)` | close connections whose send queue makes no progress for `d`, e.g. a peer that stopped reading |
 | `WithReusePort(on)` / `WithTCPNoDelay(on)` | one listening socket per ring with `SO_REUSEPORT` (default on) / `TCP_NODELAY` (default on) |
+| `WithTLS(cfg)` / `WithDialTLS(cfg)` | TLS for accepted / dialed connections; see *TLS* below |
 | `WithBackend(b)` | `BackendAuto` (default): io_uring, falling back to epoll when io_uring is unavailable; `BackendIOUring` or `BackendEpoll` to force one. `Server.Backend()` reports which one runs |
 | `WithLogger(*slog.Logger)` | warnings about failures the server recovers from (accept errors, zero-copy fallback) and debug messages (timeouts); silent by default |
 
@@ -195,6 +196,16 @@ for other formats. Oversized frames close the connection with `ErrFrameTooLarge`
 framer := uringnet.NewLengthField(2, binary.BigEndian, 64<<10)
 srv, err := uringnet.Listen("tcp", ":9000", uringnet.Framed(framer, handler)) // handler has OnMessage
 ```
+
+### TLS
+
+`WithTLS(cfg)` makes accepted connections speak TLS and `WithDialTLS(cfg)` dialed ones (the dialed host is the default
+server name). Handlers see plaintext: `OnOpen` runs once the handshake has succeeded (connections whose handshake
+fails are closed without `OnOpen`/`OnClose` and counted in `Stats.TLSHandshakeErrors`), `Write` encrypts, and `Close`
+sends `close_notify`. `Conn.TLSConnectionState` reports the negotiated state. It is built on `crypto/tls`: the
+handshake runs on a goroutine of its own, then records are decrypted and encrypted on the event loop. Throughput was
+0.93–1.24x of a `crypto/tls` server for 128-byte messages and 0.8x for 16KB (server on 1 core); in-place and
+zero-copy sends do not apply to TLS.
 
 ### UDP
 
@@ -454,6 +465,5 @@ at the top of that script and rerun it after new measurements.
   with the default SQ size of 512 (550KB at 4096), plus the receive buffers when zero-copy registers them. With the
   common 8MB limit that is about 110 rings. If `Listen` fails with "out of locked memory", raise `ulimit -l`
   (`LimitMEMLOCK=` for systemd services) or use fewer rings.
-- TLS is not supported.
 - Recv bundles need Linux 6.16+ for correct data (see *Recv bundles*).
 - When accept fails (for example `EMFILE`) it is retried with exponential backoff (5ms up to 1s) and logged with `WithLogger`.

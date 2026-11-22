@@ -5,6 +5,7 @@ package uringnet_test
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/binary"
 	"errors"
 	"expvar"
@@ -229,6 +230,20 @@ func ExampleListenPacket() {
 			pc.WriteTo(data, from)
 		}),
 		uringnet.WithBuffers(256, 2048)) // datagrams up to about 2000 bytes
+	if err != nil {
+		log.Fatal(err)
+	}
+	srv.Serve()
+}
+
+// A TLS echo server. Handlers see plaintext; OnOpen runs after the handshake.
+func ExampleWithTLS() {
+	cert, err := tls.LoadX509KeyPair("server.crt", "server.key")
+	if err != nil {
+		log.Fatal(err)
+	}
+	srv, err := uringnet.Listen("tcp", ":8443", echo{},
+		uringnet.WithTLS(&tls.Config{Certificates: []tls.Certificate{cert}}))
 	if err != nil {
 		log.Fatal(err)
 	}

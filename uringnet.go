@@ -5,6 +5,7 @@ package uringnet
 
 import (
 	"context"
+	"crypto/tls"
 	stderrors "errors"
 	"fmt"
 	"log/slog"
@@ -132,12 +133,16 @@ type URingNet struct {
 	maxHeld     int     // maximum buffers held by in-place sends (half of them)
 	starved     []*conn // connections whose receiving stopped with -ENOBUFS
 	stopping    bool
-	draining    bool // graceful shutdown: no new connections, existing ones close after flushing
-	noDelay     bool // set TCP_NODELAY on dialed connections
-	fixedIdx    int  // fixed-buffer index of the receive buffers, -1 if not registered
-	zcOff       bool // zero-copy send turned off (unsupported, or epoll)
-	zcSends     int  // SEND_ZC sends (stats, tests)
-	bundle      bool // recv bundles in use
+	draining    bool        // graceful shutdown: no new connections, existing ones close after flushing
+	noDelay     bool        // set TCP_NODELAY on dialed connections
+	tlsServer   *tls.Config // TLS for accepted connections (WithTLS)
+	tlsClient   *tls.Config // TLS for dialed connections (WithDialTLS)
+	tlsErrors   uint64      // failed TLS handshakes
+	tlsBuf      []byte      // plaintext buffer shared by the ring's TLS connections
+	fixedIdx    int         // fixed-buffer index of the receive buffers, -1 if not registered
+	zcOff       bool        // zero-copy send turned off (unsupported, or epoll)
+	zcSends     int         // SEND_ZC sends (stats, tests)
+	bundle      bool        // recv bundles in use
 	bundleBufs  []iouring.BundleBuf
 	inc         bool    // incremental buffer ring in use
 	incRefs     []int32 // incremental: slices of each buffer referenced by in-place sends
@@ -530,7 +535,7 @@ func (rn *URingNet) onAccept(res int32, flags uint32) {
 		if rn.stopping || rn.draining {
 			unix.Close(int(res))
 		} else {
-			rn.openConn(int(res), nil)
+			rn.openConn(int(res), nil, rn.tlsServer, false, nil)
 		}
 	}
 	if flags&iouring_syscall.IORING_CQE_F_MORE != 0 || rn.stopping || rn.draining {
@@ -554,21 +559,38 @@ func (rn *URingNet) onAccept(res int32, flags uint32) {
 }
 
 // openConn creates a connection for a connected fd (accepted or dialed) and calls OnOpen; ctx is set before OnOpen.
-func (rn *URingNet) openConn(fd int, ctx interface{}) *conn {
+//
+// With tlsCfg the connection first does a TLS handshake (as a client if client is set) and OnOpen runs
+// once it has succeeded. onReady (may be nil) receives the connection after OnOpen, or the handshake error.
+func (rn *URingNet) openConn(fd int, ctx interface{}, tlsCfg *tls.Config, client bool, onReady func(*conn, error)) *conn {
 	c := newConn(rn, fd)
 	c.api.ctx = ctx
 	rn.conns[fd] = c
 	rn.connCount.Add(1)
 
-	c.batching = true
-	rn.h.open(c)
-	c.batching = false
-	c.flush()
-	c.checkBackpressure()
+	if tlsCfg != nil {
+		c.startTLS(tlsCfg, client, onReady)
+		c.armRecv() // the handshake needs the peer's data
+		return c
+	}
+	c.callOpen()
 	if !c.closed && !c.paused {
 		c.armRecv()
 	}
+	if onReady != nil {
+		onReady(c, nil) // OnOpen may have closed the connection already; writes then return ErrConnClosed
+	}
 	return c
+}
+
+// callOpen calls OnOpen and sends what it wrote.
+func (c *conn) callOpen() {
+	c.opened = true
+	c.batching = true
+	c.rn.h.open(c)
+	c.batching = false
+	c.flush()
+	c.checkBackpressure()
 }
 
 // shutdownLoop closes all connections; runs on the loop thread.
@@ -604,7 +626,7 @@ func (rn *URingNet) drain() {
 		if c.err == nil {
 			c.err = ErrServerClosed
 		}
-		c.closeAfterFlush()
+		c.closeGracefully()
 	}
 }
 

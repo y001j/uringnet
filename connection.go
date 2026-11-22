@@ -5,6 +5,7 @@ package uringnet
 
 import (
 	"io"
+	"net"
 	"syscall"
 	"unsafe"
 
@@ -72,7 +73,9 @@ type conn struct {
 	curBid  int32
 	curHeld bool // the current receive buffer is held by the send queue and must not be returned after the callback
 
-	api Conn // the connection object passed to Handler callbacks
+	api    Conn      // the connection object passed to Handler callbacks
+	opened bool      // OnOpen has been called (OnClose is called only then)
+	tls    *tlsState // non-nil for TLS connections
 
 	onRecvH iouring.Handler
 	onSendH iouring.Handler
@@ -176,6 +179,13 @@ func (c *conn) onRecv(res int32, flags uint32) {
 		}
 	case res > 0:
 		c.armRecv()
+	case res == 0 && c.tls != nil:
+		// TLS: deliver the records still buffered, then handle the EOF in tlsState.readDone (during
+		// the handshake, the handshake goroutine sees the EOF and fails)
+		c.tls.tr.end(io.EOF)
+		if c.tls.ready {
+			c.tls.pump()
+		}
 	case res == 0:
 		// The peer shut down its write side (perhaps only half-closed, still waiting for a reply): stop receiving,
 		// send what was written, then close; if the peer is fully gone the send fails and the connection closes
@@ -207,6 +217,18 @@ func (c *conn) traffic(bid uint16, data []byte) (held bool) {
 	if len(data) == 0 || c.closed {
 		return false
 	}
+	if c.tls != nil {
+		if c.tls.ready {
+			// crypto/tls copies everything available into its own record buffer, so the receive buffer
+			// is only borrowed for the duration of pump and goes back at once
+			c.tls.tr.lend(data)
+			c.tls.pump()
+			c.tls.tr.unlend()
+		} else {
+			c.tls.tr.feed(data) // copied for the handshake goroutine
+		}
+		return false
+	}
 	c.curBuf, c.curBid, c.curHeld = data, int32(bid), false
 	c.rn.h.traffic(c, data)
 	held = c.curHeld
@@ -216,9 +238,21 @@ func (c *conn) traffic(bid uint16, data []byte) (held bool) {
 
 // send queues b, in place when it lies in the current receive buffer (during OnTraffic), otherwise copied.
 func (c *conn) send(b []byte) {
+	if c.tls != nil {
+		c.tls.write(b)
+		return
+	}
 	if c.writeFrom(b, c.curBuf, c.curBid) {
 		c.curHeld = true
 	}
+}
+
+// closeGracefully closes the connection once the send queue is empty, after a TLS close_notify.
+func (c *conn) closeGracefully() {
+	if c.tls != nil && !c.closeAfter && !c.closed {
+		c.tls.closeNotify()
+	}
+	c.closeAfterFlush()
 }
 
 // closeAfterFlush closes the connection once the send queue is empty, at once if it already is.
@@ -288,6 +322,22 @@ func (c *conn) write(b []byte) {
 	c.enqueue(seg{b: append(buf, b...), bid: -1, copied: true})
 }
 
+// writeOwned queues b, which the package owns (no copy): appended to the last copied segment when
+// possible, otherwise queued as a segment of its own that is reused as a copy buffer afterwards.
+func (c *conn) writeOwned(b []byte) {
+	if len(b) == 0 || c.closed {
+		return
+	}
+	if n := len(c.q); n > 0 {
+		if last := &c.q[n-1]; last.copied && n-1 >= c.inflight {
+			last.b = append(last.b, b...)
+			c.qBytes += len(b)
+			return
+		}
+	}
+	c.enqueue(seg{b: b, bid: -1, copied: true})
+}
+
 // writeNoCopy queues the user's b as is; release is called once the kernel is done with it.
 func (c *conn) writeNoCopy(b []byte, release func()) error {
 	if c.closed {
@@ -297,6 +347,13 @@ func (c *conn) writeNoCopy(b []byte, release func()) error {
 		return errConnClosed
 	}
 	if len(b) == 0 {
+		if release != nil {
+			release()
+		}
+		return nil
+	}
+	if c.tls != nil {
+		c.tls.write(b) // encrypting copies b, so it is free again at once
 		if release != nil {
 			release()
 		}
@@ -501,7 +558,12 @@ func (c *conn) free() {
 	delete(c.rn.conns, c.fd)
 	c.rn.connCount.Add(-1)
 	unix.Close(c.fd)
-	c.rn.h.closed(c)
+	if c.tls != nil {
+		c.tls.tr.end(net.ErrClosed) // stops the TLS goroutine
+	}
+	if c.opened {
+		c.rn.h.closed(c)
+	}
 	if !c.sending {
 		for len(c.q) > 0 {
 			c.popHead()

@@ -12,6 +12,7 @@
 - 第 12、13、15 项：拨出连接（Dial/DialAsync/NewClient）、UDP（ListenPacket）、分帧（Framed）已完成。
 - 第 17 项：`Server.Stats()`；第 22 项：`example_test.go`、代码注释统一为英文、架构文档 `docs/ARCHITECTURE.md`。
 - 第 16 项（零拷贝接收）不做：需要数据中心级专用网卡。
+- 第 5 项的 epoll 回退、第 14 项 TLS（WithTLS / WithDialTLS）已完成。
 
 优先级：**P0** 上生产前必须完成 · **P1** 发布 v0.1.0 前完成 · **P2** 按需求排期 · **P3** 长期目标
 
@@ -99,7 +100,7 @@
 ### 13. UDP · P2 ✅
 物联网常用（CoAP、自定义协议）。用 multishot `recvmsg` 和 `sendmsg` 实现，回调中提供对端地址。
 
-### 14. TLS · P2
+### 14. TLS · P2 ✅
 可以基于 `crypto/tls` 加内存传输层实现，或者支持内核 TLS（kTLS），以便和零拷贝发送配合使用。
 
 ### 15. 编解码框架 · P2 ✅

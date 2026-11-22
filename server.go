@@ -5,6 +5,7 @@ package uringnet
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"log/slog"
 	"net"
@@ -62,6 +63,8 @@ type options struct {
 	noDelay        bool
 	logger         *slog.Logger
 	backend        Backend
+	tlsConfig      *tls.Config
+	dialTLSConfig  *tls.Config
 }
 
 // WithRings sets the number of event loops (default runtime.NumCPU()). Each has its own
@@ -127,6 +130,17 @@ func WithReusePort(on bool) Option { return func(o *options) { o.reusePort = on 
 
 // WithTCPNoDelay sets TCP_NODELAY on accepted connections (default true).
 func WithTCPNoDelay(on bool) Option { return func(o *options) { o.noDelay = on } }
+
+// WithTLS makes accepted connections speak TLS with cfg (which needs certificates). OnOpen runs once
+// the handshake has succeeded; connections whose handshake fails are closed without OnOpen or OnClose
+// and counted in Stats.TLSHandshakeErrors. Each TLS connection runs crypto/tls on a goroutine of its
+// own, so TLS costs a goroutine switch per record and disables in-place and zero-copy sends.
+func WithTLS(cfg *tls.Config) Option { return func(o *options) { o.tlsConfig = cfg } }
+
+// WithDialTLS makes dialed connections (Dial, DialAsync) speak TLS as a client with cfg. Without a
+// ServerName in cfg, the host being dialed is used to verify the certificate. Dial returns once the
+// handshake has succeeded, or its error.
+func WithDialTLS(cfg *tls.Config) Option { return func(o *options) { o.dialTLSConfig = cfg } }
 
 // WithBackend selects the event loop implementation (default BackendAuto: io_uring, or
 // epoll when io_uring is unavailable).
@@ -198,6 +212,8 @@ func newServer(network, address string, h Handler, opts []Option) (*Server, erro
 		rn.Logger = s.log
 		rn.noDelay = o.noDelay
 		rn.Backend = o.backend
+		rn.tlsServer = o.tlsConfig
+		rn.tlsClient = o.dialTLSConfig
 	}
 	if rings[0].SocketFd >= 0 {
 		if sa, err := unix.Getsockname(rings[0].SocketFd); err == nil {

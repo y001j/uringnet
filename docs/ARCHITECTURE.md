@@ -138,6 +138,23 @@ data already written is still sent before closing. `OnClose` receives the first 
   are passed straight from the receive buffer; a partial frame is copied into a per-connection buffer
   (`Conn.pending`) and completed by later data.
 
+## TLS
+
+`crypto/tls` needs a blocking `net.Conn` and cannot pause a handshake halfway, so a TLS connection
+(`WithTLS`, `WithDialTLS`) sits on an in-memory transport (`tls.go`):
+
+1. **Handshake** on a goroutine of its own: the loop feeds received ciphertext into the transport, the
+   goroutine's blocking `Read` takes it, and handshake messages it writes are posted back to the loop to send.
+   `OnOpen` runs only after the handshake succeeded; a `Dial` returns only then.
+2. **Steady state** on the loop thread: the goroutine exits and the transport turns non-blocking. When a record
+   is incomplete it returns a temporary `net.Error`, which `crypto/tls` does not treat as fatal after the
+   handshake: it keeps the partial record and continues on the next `Read`. So received data is decrypted and
+   passed to `OnTraffic` without a goroutine switch, the receive buffer is only lent to `crypto/tls` (which
+   copies into its record buffer), and `Write` encrypts straight into the send queue, reusing send buffers.
+
+Closing sends `close_notify`; the peer's `close_notify` or EOF ends the connection after the data before it has
+been delivered. Backpressure and timeouts work on the ciphertext as for plain connections.
+
 ## The epoll backend
 
 When io_uring is unavailable (kernel before 6.0, blocked by seccomp, `kernel.io_uring_disabled`), `BackendAuto`

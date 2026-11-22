@@ -27,6 +27,9 @@ type Stats struct {
 	// ZeroCopySends counts sends made with SEND_ZC (WithZeroCopy).
 	ZeroCopySends uint64
 
+	// TLSHandshakeErrors counts connections closed because their TLS handshake failed.
+	TLSHandshakeErrors uint64
+
 	// UDP (PacketServer)
 	PacketsReceived  uint64 // datagrams delivered to OnPacket
 	PacketsSent      uint64 // datagrams sent
@@ -73,6 +76,7 @@ func (rn *URingNet) stats() Stats {
 		RecvBufferExhausted: rn.enobufs,
 		BackpressurePauses:  uint64(rn.pauses),
 		ZeroCopySends:       uint64(rn.zcSends),
+		TLSHandshakeErrors:  rn.tlsErrors,
 		PacketsReceived:     rn.packetsIn,
 		PacketsSent:         rn.packetsOut,
 		PacketsTruncated:    rn.truncated,
@@ -92,6 +96,7 @@ func (t *Stats) add(s Stats) {
 	t.RecvBufferExhausted += s.RecvBufferExhausted
 	t.BackpressurePauses += s.BackpressurePauses
 	t.ZeroCopySends += s.ZeroCopySends
+	t.TLSHandshakeErrors += s.TLSHandshakeErrors
 	t.PacketsReceived += s.PacketsReceived
 	t.PacketsSent += s.PacketsSent
 	t.PacketsTruncated += s.PacketsTruncated
