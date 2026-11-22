@@ -6,8 +6,8 @@ package main
 
 import (
 	"os"
-	"strconv"
 	"runtime"
+	"strconv"
 	"syscall"
 
 	iouring "github.com/y001j/iouring-go"
