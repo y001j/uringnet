@@ -199,8 +199,8 @@ docker run --rm --security-opt seccomp=unconfined -v "$PWD":/src -w /src golang:
 ### 结果：推荐配置（Linux 6.17）
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/bench_throughput_dark.svg">
-  <img alt="14 个场景中 gnet 和 uringnet 相对 epoll 的吞吐量" src="docs/images/bench_throughput_light.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/bench_throughput_zh_dark.svg">
+  <img alt="14 个场景中 gnet 和 uringnet 相对 epoll 的吞吐量" src="docs/images/bench_throughput_zh_light.svg">
 </picture>
 
 uringnet 使用增量缓冲区（每个 ring 32 x 64KB）。吞吐量为相对 epoll 的倍数；**粗体** = 最快。
@@ -225,8 +225,8 @@ uringnet 使用增量缓冲区（每个 ring 32 x 64KB）。吞吐量为相对 e
 中位延迟 / 服务端 CPU：
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/bench_latency_dark.svg">
-  <img alt="低负载和中等负载下 epoll、gnet、uringnet 的中位延迟" src="docs/images/bench_latency_light.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/bench_latency_zh_dark.svg">
+  <img alt="低负载和中等负载下 epoll、gnet、uringnet 的中位延迟" src="docs/images/bench_latency_zh_light.svg">
 </picture>
 
 | 连接数, 在途请求数, 消息大小 | epoll | gnet | uringnet，不轮询 | uringnet，自适应轮询 |
@@ -327,7 +327,7 @@ python3 bench/scripts/summarize.py r.txt epoll
 
 用 `SERVERS="epoll gnet uringnet uringnet-inc uringnet-spin"` 选择要测的服务端；`servers/uringnet` 支持 `-inc`、`-spin`、`-spinfixed`、`-bufs`、`-bufsize` 等参数（见 [bench/README.md](bench/README.md)）。
 
-上面的图表由 `python3 bench/scripts/charts.py` 根据结果表生成（无需任何依赖）；有新的测量结果时，修改该脚本顶部的数据后重新运行即可。
+上面的图表（中英文两套）由 `python3 bench/scripts/charts.py` 根据结果表生成（无需任何依赖）；有新的测量结果时，修改该脚本顶部的数据后重新运行即可。
 
 ## 已知问题
 
