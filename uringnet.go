@@ -97,6 +97,9 @@ type URingNet struct {
 	incPinned   int     // 增量消费：有片段引用的缓冲区数量
 	gatherSends int     // sendmsg 聚集发送次数（测试用）
 
+	acceptBackoff time.Duration // accept 出错后重新提交前的等待时间，成功 accept 后清零
+	acceptArms    int           // 提交 accept 的次数（测试用）
+
 	connCount atomic.Int64
 
 	shutdownOnce sync.Once
@@ -336,22 +339,45 @@ func (rn *URingNet) Post(fn func()) error {
 
 // ---- Loop 线程 ----
 
+// accept 出错后的退避时间：从 acceptBackoffMin 开始每次翻倍，最多 acceptBackoffMax
+const (
+	acceptBackoffMin = 5 * time.Millisecond
+	acceptBackoffMax = time.Second
+)
+
 func (rn *URingNet) armAccept() {
+	if rn.stopping {
+		return
+	}
+	rn.acceptArms++
 	rn.loop.AcceptMultishot(rn.SocketFd, unix.SOCK_CLOEXEC, rn.onAccept)
 }
 
 func (rn *URingNet) onAccept(res int32, flags uint32) {
 	if res >= 0 {
+		rn.acceptBackoff = 0
 		if rn.stopping {
 			unix.Close(int(res))
 		} else {
 			rn.openConn(int(res))
 		}
 	}
-	if flags&iouring_syscall.IORING_CQE_F_MORE == 0 && !rn.stopping {
-		// multishot accept 已终止（出错，如 EMFILE），重新提交
-		rn.armAccept()
+	if flags&iouring_syscall.IORING_CQE_F_MORE != 0 || rn.stopping {
+		return
 	}
+	// multishot accept 已终止
+	if res >= 0 {
+		rn.armAccept()
+		return
+	}
+	// 出错终止（如 EMFILE/ENFILE：fd 用完）。立即重新提交通常会马上再次失败，形成空转，
+	// 所以等一段时间再提交，连续失败时等待时间翻倍；连接仍留在监听队列中，恢复后会被 accept。
+	if rn.acceptBackoff == 0 {
+		rn.acceptBackoff = acceptBackoffMin
+	} else if rn.acceptBackoff *= 2; rn.acceptBackoff > acceptBackoffMax {
+		rn.acceptBackoff = acceptBackoffMax
+	}
+	rn.after(rn.acceptBackoff, rn.armAccept)
 }
 
 func (rn *URingNet) openConn(fd int) {
