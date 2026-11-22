@@ -39,6 +39,7 @@ type epollLoop struct {
 	ops    map[uint64]*epOp // cancellable operations: accept, recv, connect
 	ready  []completion
 	timers timerHeap
+	iov    [2]unix.Iovec // readv vector of doRecv, reused
 }
 
 type completion struct {
@@ -166,6 +167,10 @@ func (l *epollLoop) run() {
 			}
 			if st := l.fds[fd]; st != nil {
 				l.handle(st, events[i].Events)
+				// Run this fd's completions now rather than after the whole batch: otherwise the first
+				// connection's reply waits until every fd in the batch has been read, which adds latency
+				// and, with request/response traffic, costs throughput
+				l.deliver()
 			}
 		}
 		l.fireTimers()
@@ -327,21 +332,45 @@ func bufFlags(bid uint16) uint32 {
 	return iouring_syscall.IORING_CQE_F_BUFFER | uint32(bid)<<iouring_syscall.IORING_CQE_BUFFER_SHIFT | iouring_syscall.IORING_CQE_F_MORE
 }
 
+// doRecv reads with readv into two buffers at a time. If the second one stays empty the socket is
+// drained, which a plain read can only tell by trying again and getting EAGAIN (an extra syscall
+// for every message that fills a buffer exactly); if both fill up, more data is likely waiting and
+// it reads again. Level-triggered epoll reports the fd again if anything is left after the limit.
 func (l *epollLoop) doRecv(st *epFD) {
 	op := st.recv
-	for i := 0; i < 16 && st.recv == op; i++ {
+	for i := 0; i < 8 && st.recv == op; i++ {
 		bid, buf, ok := l.br.take()
 		if !ok {
 			l.endRecv(st, -int32(syscall.ENOBUFS))
 			return
 		}
-		n, err := unix.Read(st.fd, buf)
+		bid2, buf2, ok2 := l.br.take()
+		var n int
+		var err error
+		if ok2 {
+			l.iov[0].Base, l.iov[1].Base = &buf[0], &buf2[0]
+			l.iov[0].SetLen(len(buf))
+			l.iov[1].SetLen(len(buf2))
+			r, _, e := unix.Syscall(unix.SYS_READV, uintptr(st.fd), uintptr(unsafe.Pointer(&l.iov[0])), 2)
+			n = int(r)
+			if e != 0 {
+				n, err = 0, e
+			}
+		} else {
+			n, err = unix.Read(st.fd, buf)
+		}
+		if err != nil || n <= len(buf) {
+			if ok2 {
+				l.br.Recycle(bid2)
+			}
+		}
 		switch {
 		case err == unix.EAGAIN:
 			l.br.Recycle(bid)
 			return
 		case err == unix.EINTR:
 			l.br.Recycle(bid)
+			continue
 		case err != nil:
 			l.br.Recycle(bid)
 			l.endRecv(st, errnoRes(err))
@@ -350,11 +379,15 @@ func (l *epollLoop) doRecv(st *epFD) {
 			l.br.Recycle(bid)
 			l.endRecv(st, 0)
 			return
-		default:
+		case n <= len(buf):
 			l.complete(op.h, int32(n), bufFlags(bid))
-			if n < len(buf) {
-				// Short read: the socket is most likely drained. Do not try again (that only costs a read returning
-				// EAGAIN); level-triggered epoll reports the fd again if more data arrives
+			if n < len(buf) || ok2 {
+				return // drained (a full first buffer with an empty second one also means drained)
+			}
+		default: // both buffers used
+			l.complete(op.h, int32(len(buf)), bufFlags(bid))
+			l.complete(op.h, int32(n-len(buf)), bufFlags(bid2))
+			if n < len(buf)+len(buf2) {
 				return
 			}
 		}

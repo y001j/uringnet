@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/). Before v1.0.0, minor versions may change the API.
 
+## [Unreleased]
+
+### Changed
+- epoll backend: completions run after each fd's events instead of after the whole `epoll_wait` batch, recv
+  uses `readv` into two buffers to detect a drained socket without an extra read, and in-place sends may hold
+  every buffer. Median throughput against a hand-written epoll loop rose from 0.83x to 0.94x (small messages at
+  16–64 connections from 0.71–0.81x to 0.92–0.99x).
+
 ## [v0.3.0] - 2026-11-22
 
 Adds an epoll fallback and TLS with kernel TLS offload. No breaking changes.

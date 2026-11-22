@@ -419,7 +419,7 @@ python3 bench/scripts/summarize.py r.txt epoll
 
 - io_uring 需要 Linux 6.0+ 并且未被禁用：Docker 默认的 seccomp 配置和 Kubernetes 的 `RuntimeDefault` 会禁用它，Linux 6.6+ 还可以通过
   `kernel.io_uring_disabled` 关闭它。这些情况下服务会自动回退到 epoll（输出一条警告），旧内核上也能运行，但没有零拷贝发送、
-  recv bundle 和增量缓冲区，性能也较低（压测中是手写 epoll 循环的 0.77–1.18 倍）。`WithBackend(BackendIOUring)` 可以禁止回退。
+  recv bundle 和增量缓冲区，性能通常也略低（压测中是手写 epoll 循环的 0.76–1.62 倍，中位数 0.94）。`WithBackend(BackendIOUring)` 可以禁止回退。
 - 对没有 `CAP_IPC_LOCK` 权限的进程，io_uring 的环形队列按用户计入 `RLIMIT_MEMLOCK`：默认 SQ 大小 512 时每个 ring 约 70KB
   （4096 时约 550KB），开启零拷贝时注册的接收缓冲区也计算在内。常见的 8MB 上限下大约能建 110 个 ring。如果 `Listen`
   报 “out of locked memory”，请调大 `ulimit -l`（systemd 服务用 `LimitMEMLOCK=`），或减少 ring 数量。

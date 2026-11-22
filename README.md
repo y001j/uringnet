@@ -479,7 +479,7 @@ at the top of that script and rerun it after new measurements.
 - io_uring needs Linux 6.0+ and must be allowed: Docker's default seccomp profile and Kubernetes `RuntimeDefault` block it,
   and Linux 6.6+ can disable it with `kernel.io_uring_disabled`. Otherwise the server falls back to epoll (logged as a
   warning), which works on older kernels too but has no zero-copy send, recv bundles or incremental buffers, and is
-  slower (in the benchmark 0.77–1.18x of a hand-written epoll loop). `WithBackend(BackendIOUring)` disables the fallback.
+  usually somewhat slower (in the benchmark 0.76–1.62x of a hand-written epoll loop, median 0.94). `WithBackend(BackendIOUring)` disables the fallback.
 - io_uring rings count against `RLIMIT_MEMLOCK`, per user, for processes without `CAP_IPC_LOCK`: about 70KB per ring
   with the default SQ size of 512 (550KB at 4096), plus the receive buffers when zero-copy registers them. With the
   common 8MB limit that is about 110 rings. If `Listen` fails with "out of locked memory", raise `ulimit -l`

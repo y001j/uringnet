@@ -426,7 +426,10 @@ func (rn *URingNet) start(bufferCount int) error {
 	}
 	rn.loop, rn.br = l, l.BufferRing()
 	rn.backend = BackendEpoll
-	rn.maxHeld = bufferCount / 2
+	// io_uring limits in-place sends to half the buffers so the kernel always has buffers to pick from.
+	// The epoll backend's pool is ours, and its sends usually complete in the same iteration, so the
+	// limit would only force copies: all buffers may be held
+	rn.maxHeld = bufferCount
 	rn.fixedIdx = -1
 	rn.zcOff = true // no zero-copy send on epoll
 	return rn.finishStart()
