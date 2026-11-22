@@ -120,6 +120,7 @@ func main() {
 |---|---|
 | `WithRings(n)` | 事件循环数量，每个有自己的 io_uring 和锁定的系统线程（默认 `runtime.NumCPU()`） |
 | `WithBuffers(count, size)` | 每个 ring 的接收缓冲区：`count` 个（向上取整为 2 的幂，默认 256），每个 `size` 字节（默认 16KB）。见下文*接收缓冲区的数量* |
+| `WithSQSize(n)` | 每个 ring 的提交队列大小（默认 512；完成队列是它的 4 倍）。见*已知问题*中关于锁定内存的说明 |
 | `WithBusyPoll(d)` | 阻塞前先忙轮询 `d`（如 `50*time.Microsecond`）：以 CPU 换取更低的延迟。自适应：循环满载时自动停止 |
 | `WithBusyPollThresholds(busy, idle)` / `WithBusyPollFixed(d)` | 调整自适应轮询的阈值（默认每轮 128 / 64 个完成事件）/ 始终轮询 |
 | `WithZeroCopy(threshold)` | 不少于 `threshold` 字节的写入使用 `IORING_OP_SEND_ZC` 发送，见下文 |
@@ -359,6 +360,9 @@ python3 bench/scripts/summarize.py r.txt epoll
 > **警告：** 本项目仍在开发中。如果发现任何问题或有任何建议，欢迎提交 issue。
 
 - 需要 Linux 6.0+ 并启用 io_uring。Docker 默认的 seccomp 配置和 Kubernetes 的 `RuntimeDefault` 会禁用 io_uring，Linux 6.6+ 还可以通过 `kernel.io_uring_disabled` 关闭它。目前没有回退到 epoll 的机制。
+- 对没有 `CAP_IPC_LOCK` 权限的进程，io_uring 的环形队列按用户计入 `RLIMIT_MEMLOCK`：默认 SQ 大小 512 时每个 ring 约 70KB
+  （4096 时约 550KB），开启零拷贝时注册的接收缓冲区也计算在内。常见的 8MB 上限下大约能建 110 个 ring。如果 `Listen`
+  报 “out of locked memory”，请调大 `ulimit -l`（systemd 服务用 `LimitMEMLOCK=`），或减少 ring 数量。
 - 只支持流式套接字（TCP、Unix），不支持 UDP 和 TLS。
 - recv bundle 需要 Linux 6.16+ 才能保证数据正确（见 *Recv bundle*）。
 - accept 失败（例如 `EMFILE`）时会按指数退避重试（5ms 起，最长 1s），并通过 `WithLogger` 输出日志。

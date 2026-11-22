@@ -36,6 +36,10 @@ type Server struct {
 	stopOnce sync.Once
 }
 
+// defaultSQSize 是 Listen 的默认 SQ 大小。实测（单核服务端，512 连接管道化）SQ 从 4096 降到 256
+// 吞吐没有变化，而 SQ 4096 时每个 ring 锁定约 550KB 内存，常见的 8MB RLIMIT_MEMLOCK 下只能建 15 个 ring。
+const defaultSQSize = 512
+
 // Option configures a Server; see the With* functions.
 type Option func(*options)
 
@@ -71,7 +75,10 @@ func WithBuffers(count, size int) Option {
 	return func(o *options) { o.bufCount, o.bufSize = count, size }
 }
 
-// WithSQSize sets the submission queue size per ring (default 4096).
+// WithSQSize sets the submission queue size per ring (default 512; the completion queue
+// is 4 times larger). A full submission queue is simply submitted early, so larger values
+// rarely help, while the rings count against RLIMIT_MEMLOCK (about 70KB per ring at 512,
+// 550KB at 4096) for processes without CAP_IPC_LOCK.
 func WithSQSize(n uint) Option { return func(o *options) { o.sqSize = n } }
 
 // WithBusyPoll makes each event loop poll for completions for d before blocking: lower
@@ -130,7 +137,7 @@ func Listen(network, address string, h Handler, opts ...Option) (*Server, error)
 	if h == nil {
 		return nil, fmt.Errorf("uringnet: nil Handler")
 	}
-	o := options{rings: runtime.NumCPU(), sqSize: 4096, bufCount: 256, bufSize: DefaultBufferSize,
+	o := options{rings: runtime.NumCPU(), sqSize: defaultSQSize, bufCount: 256, bufSize: DefaultBufferSize,
 		reusePort: true, noDelay: true}
 	for _, opt := range opts {
 		opt(&o)
