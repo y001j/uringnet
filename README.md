@@ -126,6 +126,9 @@ func main() {
 | `URingNet.ZeroCopyThreshold` | enable zero-copy send (`IORING_OP_SEND_ZC`) for writes of at least this many bytes; 0 disables |
 | `URingNet.RecvBundle` | recv bundles: one completion can carry several receive buffers. `BundleAuto` (default) enables them on Linux 6.16+ only; see below |
 | `URingNet.IncrementalBuffers` | **experimental**: incremental buffer ring (Linux 6.12+), best with `BufferSize` 64KB and 32+ buffers; see below |
+| `URingNet.MaxWriteBuffer` | per-connection send queue limit (default 4MB, negative = unlimited). Above it the connection's receiving is paused (no `OnTraffic`) until the queue drains below half, so a peer that does not read cannot make the server buffer without limit |
+| `URingNet.IdleTimeout` | close connections that have neither received nor sent data for this long (0 disables) |
+| `URingNet.WriteTimeout` | close connections whose send queue has made no progress for this long, e.g. a peer that stopped reading (0 disables) |
 | `SetLoops(rings, bufferCount)` | create the event loops; `bufferCount` (receive buffers per ring) is rounded up to a power of 2 (max 32768). See *Sizing receive buffers* below |
 | `UserData.WriteNoCopy(b, release)` | queue `b` without copying; `release` is called once the kernel no longer uses it |
 | `Ringloop.RunMany()` / `Wait()` / `Shutdown()` | start accepting / block until shut down / close all connections and loops |
@@ -388,5 +391,5 @@ at the top of that script and rerun it after new measurements.
   and Linux 6.6+ can disable it with `kernel.io_uring_disabled`. There is no epoll fallback yet.
 - Only stream sockets (TCP, Unix) are supported; UDP and TLS are not.
 - Recv bundles need Linux 6.16+ for correct data (see *Recv bundles*).
-- The send queue of a connection is unbounded: a peer that never reads lets the server buffer data without limit.
-- If accept keeps failing (for example `EMFILE`), the multishot accept is re-armed immediately and can spin.
+- When accept fails (for example `EMFILE`) it is retried with exponential backoff (5ms up to 1s); there is no callback
+  or log for it yet.

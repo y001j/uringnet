@@ -116,6 +116,9 @@ func main() {
 | `URingNet.ZeroCopyThreshold` | 写入不少于这么多字节时启用零拷贝发送（`IORING_OP_SEND_ZC`）；0 表示关闭 |
 | `URingNet.RecvBundle` | recv bundle：一个完成事件可以携带多个接收缓冲区。`BundleAuto`（默认）只在 Linux 6.16+ 上启用，见下文 |
 | `URingNet.IncrementalBuffers` | **实验性**：增量缓冲区 ring（Linux 6.12+），`BufferSize` 设为 64KB、缓冲区数量 32 个以上时效果最好，见下文 |
+| `URingNet.MaxWriteBuffer` | 每个连接发送队列的上限（默认 4MB，负数表示不限制）。超过时暂停接收该连接的数据（不再调用 `OnTraffic`），队列降到一半以下后恢复，这样不读数据的对端不会让服务端无限缓存 |
+| `URingNet.IdleTimeout` | 连接在这段时间内既没收到也没发出数据就关闭（0 表示不检查） |
+| `URingNet.WriteTimeout` | 发送队列在这段时间内没有任何发送进展（例如对端不再读取）就关闭连接（0 表示不检查） |
 | `SetLoops(rings, bufferCount)` | 创建事件循环；`bufferCount`（每个 ring 的接收缓冲区数量）会向上取整为 2 的幂（最大 32768）。见下文*接收缓冲区的数量* |
 | `UserData.WriteNoCopy(b, release)` | 不拷贝地把 `b` 加入发送队列；内核不再使用它时调用 `release` |
 | `Ringloop.RunMany()` / `Wait()` / `Shutdown()` | 开始接受连接 / 阻塞直到关闭 / 关闭所有连接和事件循环 |
@@ -336,5 +339,4 @@ python3 bench/scripts/summarize.py r.txt epoll
 - 需要 Linux 6.0+ 并启用 io_uring。Docker 默认的 seccomp 配置和 Kubernetes 的 `RuntimeDefault` 会禁用 io_uring，Linux 6.6+ 还可以通过 `kernel.io_uring_disabled` 关闭它。目前没有回退到 epoll 的机制。
 - 只支持流式套接字（TCP、Unix），不支持 UDP 和 TLS。
 - recv bundle 需要 Linux 6.16+ 才能保证数据正确（见 *Recv bundle*）。
-- 每个连接的发送队列没有上限：如果对端一直不读取，服务端会无限制地缓存数据。
-- 如果 accept 持续失败（例如 `EMFILE`），multishot accept 会立即重新提交，可能陷入空转。
+- accept 失败（例如 `EMFILE`）时会按指数退避重试（5ms 起，最长 1s），目前还没有相应的回调或日志。
