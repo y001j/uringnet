@@ -22,6 +22,9 @@ import (
 // DefaultBufferSize 是 provided buffer ring 中单个接收缓冲区的默认大小
 const DefaultBufferSize = 16384
 
+// DefaultMaxWriteBuffer 是每个连接发送队列的默认上限，见 URingNet.MaxWriteBuffer
+const DefaultMaxWriteBuffer = 4 << 20
+
 var errConnClosed = stderrors.New("uringnet: connection closed")
 
 // URingNet 是一个 io_uring 事件循环实例。
@@ -72,6 +75,12 @@ type URingNet struct {
 	// 缓冲区数量。启用后不使用 recv bundle；内核不支持时自动退回普通模式。
 	IncrementalBuffers bool
 
+	// MaxWriteBuffer 为每个连接发送队列中待发送字节数的上限（背压）。超过时暂停接收该连接的数据
+	// （不再调用 OnTraffic），队列降到一半以下时恢复。这样不读数据的对端不会让服务端无限缓存：
+	// 接收暂停后对端的发送也会被 TCP 流控挡住。0 表示使用 DefaultMaxWriteBuffer，负数表示不限制。
+	// 单次回调写入的数据不会被拒绝，所以队列可能短暂超过上限。
+	MaxWriteBuffer int
+
 	index      int
 	entries    uint32
 	ownsSocket bool // SocketFd 是否由本实例独占（ReusePort 时每个实例一个监听 socket）
@@ -96,6 +105,9 @@ type URingNet struct {
 	incDone     []bool  // 增量消费：内核已用完该缓冲区
 	incPinned   int     // 增量消费：有片段引用的缓冲区数量
 	gatherSends int     // sendmsg 聚集发送次数（测试用）
+	maxWrite    int     // 生效的 MaxWriteBuffer，<= 0 表示不限制
+	pauses      int     // 因背压暂停接收的次数（测试用）
+	nopH        iouring.Handler
 
 	acceptBackoff time.Duration // accept 出错后重新提交前的等待时间，成功 accept 后清零
 	acceptArms    int           // 提交 accept 的次数（测试用）
@@ -323,6 +335,11 @@ func (rn *URingNet) start(bufferCount int) error {
 		(rn.RecvBundle == BundleOn || (rn.RecvBundle == BundleAuto && bundleSafeKernel()))
 	rn.fixedIdx = rn.br.FixedIndex()
 	rn.conns = make(map[int]*conn)
+	rn.maxWrite = rn.MaxWriteBuffer
+	if rn.maxWrite == 0 {
+		rn.maxWrite = DefaultMaxWriteBuffer
+	}
+	rn.nopH = func(int32, uint32) {}
 	return nil
 }
 
@@ -393,7 +410,8 @@ func (rn *URingNet) openConn(fd int) {
 	c.handleAction(action, nil, -1)
 	c.batching = false
 	c.flush()
-	if !c.closed {
+	c.checkBackpressure()
+	if !c.closed && !c.paused {
 		c.armRecv()
 	}
 }
