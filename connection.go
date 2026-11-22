@@ -179,7 +179,12 @@ func (c *conn) onRecv(res int32, flags uint32) {
 	case res > 0:
 		c.armRecv()
 	case res == 0:
-		c.fail(io.EOF)
+		// 对端关闭了写方向（可能只是半关闭，仍在等回复）：不再接收，把已写入的数据发完再关闭；
+		// 对端已完全关闭时发送会失败，连接随之关闭
+		if c.err == nil {
+			c.err = io.EOF
+		}
+		c.closeAfterFlush()
 	default:
 		c.fail(syscall.Errno(-res))
 	}

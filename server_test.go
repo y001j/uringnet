@@ -357,3 +357,32 @@ func (s *syncBuffer) Bytes() []byte {
 	defer s.mu.Unlock()
 	return append([]byte(nil), s.b.Bytes()...)
 }
+
+// 对端发完数据后半关闭（只关写方向）：服务端仍要把回复发完再关闭
+func TestPeerHalfClose(t *testing.T) {
+	h := &apiEcho{}
+	_, addr := serve(t, h, WithRings(1))
+	c, err := net.Dial("tcp4", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	msg := make([]byte, 256<<10)
+	rand.Read(msg)
+	if _, err := c.Write(msg); err != nil {
+		t.Fatal(err)
+	}
+	c.(*net.TCPConn).CloseWrite()
+	c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	got, err := io.ReadAll(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, msg) {
+		t.Fatalf("got %d bytes back after half-close, want %d", len(got), len(msg))
+	}
+	waitFor(t, func() bool { return len(h.closeErrs()) == 1 }, "OnClose")
+	if err := h.closeErrs()[0]; err != io.EOF {
+		t.Fatalf("OnClose error %v, want io.EOF", err)
+	}
+}
