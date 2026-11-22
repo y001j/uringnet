@@ -92,6 +92,7 @@ type URingNet struct {
 	entries    uint32
 	ownsSocket bool // SocketFd 是否由本实例独占（ReusePort 时每个实例一个监听 socket）
 
+	h        connHandler // 回调：旧 API 时包装 Handler，新 API 时包装 Server 的 Handler
 	loop     *iouring.Loop
 	br       *iouring.BufferRing
 	ringloop *Ringloop
@@ -304,8 +305,11 @@ func listen(addr NetAddress, options socket.SocketOptions) (int, error) {
 
 // start 创建事件循环，在 SetLoops 中调用
 func (rn *URingNet) start(bufferCount int) error {
-	if rn.Handler == nil {
-		return fmt.Errorf("uringnet: ring %d has no Handler", rn.index)
+	if rn.h == nil {
+		if rn.Handler == nil {
+			return fmt.Errorf("uringnet: ring %d has no Handler", rn.index)
+		}
+		rn.h = legacyHandler{rn.Handler}
 	}
 	if rn.BufferSize <= 0 {
 		rn.BufferSize = DefaultBufferSize
@@ -417,11 +421,7 @@ func (rn *URingNet) openConn(fd int) {
 	rn.connCount.Add(1)
 
 	c.batching = true
-	out, action := rn.Handler.OnOpen(&c.ud)
-	if len(out) > 0 {
-		c.write(out)
-	}
-	c.handleAction(action, nil, -1)
+	rn.h.open(c)
 	c.batching = false
 	c.flush()
 	c.checkBackpressure()
@@ -457,8 +457,8 @@ func (rn *URingNet) ShutDown() {
 		if rn.ownsSocket {
 			unix.Close(rn.SocketFd)
 		}
-		if rn.Handler != nil {
-			rn.Handler.OnShutdown(rn)
+		if rn.h != nil {
+			rn.h.shutdown(rn)
 		}
 	})
 }

@@ -77,7 +77,7 @@ func roundPow2(n int) int {
 func (loop *Ringloop) RunMany() {
 	for _, rn := range loop.RingNet {
 		rn := rn
-		rn.Handler.OnBoot(rn)
+		rn.h.boot(rn)
 		rn.loop.Post(rn.armAccept)
 		rn.loop.Post(rn.startTimeouts)
 	}
@@ -113,6 +113,9 @@ func (loop *Ringloop) Shutdown() {
 // startTicker 驱动 OnTick（使用第一个实例的 Handler），OnTick 在独立的 goroutine 中执行
 func (loop *Ringloop) startTicker() {
 	h := loop.RingNet[0].Handler
+	if h == nil { // 新 API 没有 OnTick
+		return
+	}
 	delay, action := h.OnTick()
 	if action == Shutdown {
 		go loop.Shutdown()
