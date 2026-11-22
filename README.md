@@ -1,9 +1,16 @@
-# UringNet
+<h1 align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/logo_dark.svg">
+    <img alt="UringNet" src="docs/images/logo_light.svg" width="460">
+  </picture>
+</h1>
 
-[![Build](https://github.com/y001j/uringnet/actions/workflows/go.yml/badge.svg?branch=master)](https://github.com/y001j/uringnet/actions/workflows/go.yml)
-[![Go Reference](https://pkg.go.dev/badge/github.com/y001j/uringnet.svg)](https://pkg.go.dev/github.com/y001j/uringnet)
-[![Go version](https://img.shields.io/github/go-mod/go-version/y001j/uringnet)](go.mod)
-[![License](https://img.shields.io/github/license/y001j/uringnet)](LICENSE)
+<p align="center">
+  <a href="https://github.com/y001j/uringnet/actions/workflows/go.yml"><img alt="Build" src="https://github.com/y001j/uringnet/actions/workflows/go.yml/badge.svg?branch=master"></a>
+  <a href="https://pkg.go.dev/github.com/y001j/uringnet"><img alt="Go Reference" src="https://pkg.go.dev/badge/github.com/y001j/uringnet.svg"></a>
+  <a href="go.mod"><img alt="Go version" src="https://img.shields.io/github/go-mod/go-version/y001j/uringnet"></a>
+  <a href="LICENSE"><img alt="License" src="https://img.shields.io/github/license/y001j/uringnet"></a>
+</p>
 
 ## Introduction
 
