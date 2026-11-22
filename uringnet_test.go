@@ -548,6 +548,38 @@ func TestIncrementalBuffersNoStall(t *testing.T) {
 	}
 }
 
+// 增量缓冲区 + 零拷贝发送（跨机器压测里的 uringnet-best-zc 组合）：原地发送的片段用 SEND_ZC，
+// 片段引用要等通知 CQE 到达后才释放
+func TestIncrementalBuffersZeroCopy(t *testing.T) {
+	h := &testHandler{}
+	loop, addr := startServerCfg(t, h, 2, false, 32, func(rn *URingNet) {
+		rn.IncrementalBuffers = true
+		rn.BufferSize = 64 << 10
+		rn.ZeroCopyThreshold = 1024
+	})
+	defer loop.Shutdown()
+	if !loop.RingNet[0].inc {
+		t.Skip("kernel does not support incremental buffer rings (needs 6.12+)")
+	}
+	runEchoClients(t, addr, 32, []int{100, 2048, 65536, 1 << 20})
+	waitFor(t, func() bool { return h.closed.Load() == 32 }, "OnClose x32")
+	total := 0
+	for _, rn := range loop.RingNet {
+		waitFor(t, func() bool {
+			res := make(chan [2]int, 1)
+			rn.Post(func() { res <- [2]int{rn.held, rn.incPinned} })
+			r := <-res
+			return r[0] == 0 && r[1] == 0
+		}, "all buffer references released after notifications")
+		res := make(chan int, 1)
+		rn.Post(func() { res <- rn.zcSends })
+		total += <-res
+	}
+	if total == 0 {
+		t.Error("SEND_ZC was never used")
+	}
+}
+
 func TestUnsupportedProtocol(t *testing.T) {
 	if _, err := NewMany(NetAddress{AddrType: socket.Udp4, Address: "127.0.0.1:0"}, 64, false, 1, socket.SocketOptions{}, &testHandler{}); err == nil {
 		t.Fatal("expected error for udp")

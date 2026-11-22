@@ -346,6 +346,17 @@ MODE=onecore DEPTHS="1 8" bench/docker.sh     # server 1 core / client 8 cores
 sh bench/scripts/run.sh                       # directly on a Linux machine (needs taskset and 12 CPUs)
 ```
 
+Across two machines over a real NIC (needed to see the effect of zero-copy send):
+
+```shell
+sh bench/scripts/serve.sh                              # on the server machine
+SERVER=<server IP> sh bench/scripts/remote.sh > r.txt  # on the client machine (Linux or macOS)
+python3 bench/scripts/summarize.py r.txt epoll
+```
+
+`serve.sh` starts the echo servers and a small agent that reports their ports and CPU time to the client; compare
+`uringnet-best` with `uringnet-best-zc` at 16KB and 64KB. Details: [bench/README.md](bench/README.md#跨机器压测).
+
 `SERVERS="epoll gnet uringnet uringnet-inc uringnet-spin"` selects the servers; `servers/uringnet` takes `-inc`, `-spin`,
 `-spinfixed`, `-bufs`, `-bufsize` and more (see [bench/README.md](bench/README.md)).
 

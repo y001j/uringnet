@@ -20,6 +20,7 @@ func main() {
 	size := flag.Int("s", 128, "request size in bytes")
 	dur := flag.Duration("d", 5*time.Second, "measurement duration")
 	depth := flag.Int("p", 1, "pipeline depth: requests in flight per connection")
+	timeout := flag.Duration("timeout", 30*time.Second, "per-round-trip timeout; a connection that stalls longer stops")
 	flag.Parse()
 	var ops atomic.Int64
 	var latMu sync.Mutex
@@ -47,6 +48,7 @@ func main() {
 				if k&15 == 0 {
 					t0 = time.Now()
 				}
+				c.SetDeadline(time.Now().Add(*timeout))
 				if _, err := c.Write(msg); err != nil {
 					return
 				}

@@ -13,6 +13,8 @@ import (
 	iouring "github.com/y001j/iouring-go"
 	iouring_syscall "github.com/y001j/iouring-go/syscall"
 	"golang.org/x/sys/unix"
+
+	"github.com/y001j/uringnet/bench/internal/netaddr"
 )
 
 type chunk struct {
@@ -111,11 +113,11 @@ func listen(addr string) int {
 	unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_REUSEPORT, 1)
 	unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_REUSEADDR, 1)
 	unix.SetsockoptInt(fd, unix.IPPROTO_TCP, unix.TCP_NODELAY, 1)
-	var port int
-	for _, ch := range addr[len("127.0.0.1:"):] {
-		port = port*10 + int(ch-'0')
+	sa, err := netaddr.Inet4(addr)
+	if err != nil {
+		panic(err)
 	}
-	if err := unix.Bind(fd, &unix.SockaddrInet4{Port: port, Addr: [4]byte{127, 0, 0, 1}}); err != nil {
+	if err := unix.Bind(fd, sa); err != nil {
 		panic(err)
 	}
 	unix.Listen(fd, 4096)

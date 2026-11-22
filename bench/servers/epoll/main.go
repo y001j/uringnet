@@ -9,27 +9,33 @@ import (
 	"runtime"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/y001j/uringnet/bench/internal/netaddr"
 )
 
 type conn struct {
 	out []byte // 未写完的数据
 }
 
-func listen(port int) int {
+func listen(addr string) int {
 	fd, _ := unix.Socket(unix.AF_INET, unix.SOCK_STREAM|unix.SOCK_NONBLOCK|unix.SOCK_CLOEXEC, 0)
 	unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_REUSEPORT, 1)
 	unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_REUSEADDR, 1)
 	unix.SetsockoptInt(fd, unix.IPPROTO_TCP, unix.TCP_NODELAY, 1)
-	if err := unix.Bind(fd, &unix.SockaddrInet4{Port: port, Addr: [4]byte{127, 0, 0, 1}}); err != nil {
+	sa, err := netaddr.Inet4(addr)
+	if err != nil {
+		panic(err)
+	}
+	if err := unix.Bind(fd, sa); err != nil {
 		panic(err)
 	}
 	unix.Listen(fd, 4096)
 	return fd
 }
 
-func loop(port int) {
+func loop(addr string) {
 	runtime.LockOSThread()
-	lfd := listen(port)
+	lfd := listen(addr)
 	ep, _ := unix.EpollCreate1(unix.EPOLL_CLOEXEC)
 	unix.EpollCtl(ep, unix.EPOLL_CTL_ADD, lfd, &unix.EpollEvent{Events: unix.EPOLLIN, Fd: int32(lfd)})
 	conns := map[int]*conn{}
@@ -104,12 +110,8 @@ func loop(port int) {
 }
 
 func main() {
-	port := 0
-	for _, ch := range os.Args[1][len("127.0.0.1:"):] {
-		port = port*10 + int(ch-'0')
-	}
 	for i := 0; i < runtime.NumCPU(); i++ {
-		go loop(port)
+		go loop(os.Args[1])
 	}
 	select {}
 }
