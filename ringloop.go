@@ -12,6 +12,8 @@ import (
 )
 
 // Ringloop 管理一组 URingNet 事件循环
+//
+// Deprecated: use Server (Listen, Serve, Shutdown).
 type Ringloop struct {
 	RingNet   []*URingNet // 事件循环实例
 	RingCount int32       // 实例数量
@@ -29,6 +31,8 @@ type Ringloop struct {
 //	                   单个缓冲区大小由 URingNet.BufferSize 决定。
 //	                   数量应不少于每个实例上同时活跃的连接数（否则频繁 -ENOBUFS），
 //	                   在此前提下越少越好：内核按 FIFO 轮流使用，缓冲区越少拷贝时缓存越热。
+//
+// Deprecated: use Listen with WithBuffers.
 func SetLoops(urings []*URingNet, bufferCount int) (*Ringloop, error) {
 	size := len(urings)
 	if size == 0 {
@@ -152,18 +156,34 @@ type Action int
 const (
 	// None indicates that no action should occur following an event.
 	None Action = iota
+	// Echo sends UserData.WriteBuf.
+	//
+	// Deprecated: write with Conn.Write and return None.
 	Echo
+	// Read does nothing; receiving is always active.
+	//
+	// Deprecated: return None.
 	Read
-	EchoAndClose // response then close
+	// EchoAndClose sends UserData.WriteBuf, then closes the connection.
+	//
+	// Deprecated: write with Conn.Write and return Close.
+	EchoAndClose
+	// Write sends UserData.WriteBuf.
+	//
+	// Deprecated: write with Conn.Write and return None.
 	Write
-	Close    // Close the connection.
-	Shutdown // Shutdown the whole engine.
+	// Close closes the connection. With Handler, data already written is sent first.
+	Close
+	// Shutdown shuts the whole server down.
+	Shutdown
 )
 
 type (
 	// EventHandler represents the engine events' callbacks for the Run call.
 	// Each event has an Action return value that is used manage the state
 	// of the connection and engine.
+	//
+	// Deprecated: implement Handler and use Listen.
 	EventHandler interface {
 		// OnBoot fires when the engine is ready for accepting connections.
 		// The parameter engine has information and various utilities.
@@ -210,6 +230,8 @@ type (
 	// BuiltinEventEngine is a built-in implementation of EventHandler which sets up each method with a default implementation,
 	// you can compose it with your own implementation of EventHandler when you don't want to implement all methods
 	// in EventHandler.
+	//
+	// Deprecated: embed BuiltinHandler in a Handler.
 	BuiltinEventEngine struct {
 		ctx interface{}
 	}

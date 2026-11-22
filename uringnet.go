@@ -158,6 +158,8 @@ type URingNet struct {
 }
 
 // UserData 是一个连接在回调中的视图，每个连接一个，在连接的整个生命周期内复用。
+//
+// Deprecated: use Handler, which receives a *Conn. UserData will be removed in a later release.
 type UserData struct {
 	Fd int32
 
@@ -223,6 +225,8 @@ func bundleSafeKernel() bool {
 }
 
 // NetAddress 描述监听地址
+//
+// Deprecated: Listen takes the network and address directly.
 type NetAddress struct {
 	AddrType socket.NetAddressType
 	Address  string
@@ -233,6 +237,8 @@ type NetAddress struct {
 // size 为 SQ 大小（内核会向上取整为 2 的幂）。sqpoll 已不再使用：
 // 事件循环改为 SINGLE_ISSUER/DEFER_TASKRUN 模式，每轮只有一次 io_uring_enter，
 // 不需要额外的 SQPOLL 内核线程空转。
+//
+// Deprecated: use Listen.
 func New(addr NetAddress, size uint, sqpoll bool, options socket.SocketOptions) (*URingNet, error) {
 	rings, err := NewMany(addr, size, sqpoll, 1, options, nil)
 	if err != nil {
@@ -250,6 +256,8 @@ func New(addr NetAddress, size uint, sqpoll bool, options socket.SocketOptions) 
 // options.ReusePort 为 true 时每个实例创建自己的监听 socket，由内核在它们之间均衡新连接；
 // 否则所有实例共享一个监听 socket。
 // 目前只支持面向流的协议（tcp/tcp4/tcp6/unix）。
+//
+// Deprecated: use Listen with options (WithRings, WithBuffers, ...).
 func NewMany(addr NetAddress, size uint, sqpoll bool, num int, options socket.SocketOptions, handler EventHandler) ([]*URingNet, error) {
 	if num <= 0 {
 		return nil, fmt.Errorf("uringnet: invalid number of rings %d", num)

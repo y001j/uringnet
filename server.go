@@ -84,6 +84,13 @@ func WithBusyPollFixed(d time.Duration) Option {
 	return func(o *options) { o.spin, o.spinFixed = d, true }
 }
 
+// WithBusyPollThresholds tunes adaptive busy polling: polling stops when the event loop
+// handles busy completions per iteration on average, and resumes below idle (defaults
+// 128 and 64). Higher values keep polling under more load (favouring latency).
+func WithBusyPollThresholds(busy, idle int) Option {
+	return func(o *options) { o.spinBusy, o.spinIdle = busy, idle }
+}
+
 // WithZeroCopy sends writes of at least threshold bytes with SEND_ZC (in-place sends of
 // received data and WriteNoCopy). Useful from about 10KB up across a real NIC; never for
 // loopback, where the kernel copies anyway.

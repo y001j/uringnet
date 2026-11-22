@@ -10,14 +10,14 @@ import (
 	"runtime"
 
 	"github.com/y001j/uringnet"
-	socket "github.com/y001j/uringnet/sockets"
 )
 
-type echo struct{ uringnet.BuiltinEventEngine }
+type echo struct{ uringnet.BuiltinHandler }
 
-func (e *echo) OnTraffic(d *uringnet.UserData, _ *uringnet.URingNet) uringnet.Action {
-	d.WriteBuf = d.Buffer
-	return uringnet.Echo
+// OnTraffic 原样写回：数据位于接收缓冲区中，原地发送
+func (echo) OnTraffic(c *uringnet.Conn, data []byte) uringnet.Action {
+	c.Write(data)
+	return uringnet.None
 }
 
 func main() {
@@ -36,30 +36,29 @@ func main() {
 		fmt.Println("usage: uringnet [flags] <addr>")
 		os.Exit(1)
 	}
-	opts := socket.SocketOptions{TCPNoDelay: socket.TCPNoDelay, ReusePort: true}
-	rns, err := uringnet.NewMany(uringnet.NetAddress{AddrType: socket.Tcp4, Address: flag.Arg(0)}, 4096, false, *rings, opts, &echo{})
+	opts := []uringnet.Option{
+		uringnet.WithRings(*rings),
+		uringnet.WithBuffers(*bufs, *bufSize),
+		uringnet.WithZeroCopy(*zc),
+		uringnet.WithBusyPollThresholds(*spinBusy, *spinIdle),
+	}
+	if *spinFixed {
+		opts = append(opts, uringnet.WithBusyPollFixed(*spin))
+	} else {
+		opts = append(opts, uringnet.WithBusyPoll(*spin))
+	}
+	if *inc {
+		opts = append(opts, uringnet.WithIncrementalBuffers())
+	}
+	switch *bundle {
+	case "on":
+		opts = append(opts, uringnet.WithRecvBundle(uringnet.BundleOn))
+	case "off":
+		opts = append(opts, uringnet.WithRecvBundle(uringnet.BundleOff))
+	}
+	srv, err := uringnet.Listen("tcp4", flag.Arg(0), echo{}, opts...)
 	if err != nil {
 		panic(err)
 	}
-	for _, rn := range rns {
-		rn.BufferSize = *bufSize
-		rn.SpinTime = *spin
-		rn.SpinFixed = *spinFixed
-		rn.SpinBusyBatch = *spinBusy
-		rn.SpinIdleBatch = *spinIdle
-		rn.ZeroCopyThreshold = *zc
-		rn.IncrementalBuffers = *inc
-		switch *bundle {
-		case "on":
-			rn.RecvBundle = uringnet.BundleOn
-		case "off":
-			rn.RecvBundle = uringnet.BundleOff
-		}
-	}
-	l, err := uringnet.SetLoops(rns, *bufs)
-	if err != nil {
-		panic(err)
-	}
-	l.RunMany()
-	l.Wait()
+	srv.Serve()
 }
