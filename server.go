@@ -66,6 +66,12 @@ type options struct {
 	tlsConfig      *tls.Config
 	noKTLS         bool
 	dialTLSConfig  *tls.Config
+	keepAlive      time.Duration
+	recvBuf        int
+	sendBuf        int
+	slowCallback   time.Duration
+	balance        LoadBalancing
+	mcastIface     string
 }
 
 // WithRings sets the number of event loops (default runtime.NumCPU()). Each has its own
@@ -156,6 +162,27 @@ func WithKTLS(on bool) Option { return func(o *options) { o.noKTLS = !on } }
 // epoll when io_uring is unavailable).
 func WithBackend(b Backend) Option { return func(o *options) { o.backend = b } }
 
+// WithTCPKeepAlive enables TCP keepalive with the given idle time and probe interval: a peer
+// that vanished without closing the connection is detected after about d plus 9 probes. It
+// applies to accepted (inherited from the listening socket) and dialed connections.
+func WithTCPKeepAlive(d time.Duration) Option { return func(o *options) { o.keepAlive = d } }
+
+// WithSocketBuffers sets the kernel receive and send buffer sizes (SO_RCVBUF, SO_SNDBUF) of
+// accepted, dialed and UDP sockets; 0 keeps the system default (which auto-tunes for TCP).
+func WithSocketBuffers(recv, send int) Option {
+	return func(o *options) { o.recvBuf, o.sendBuf = recv, send }
+}
+
+// WithMulticastInterface names the network interface used to join multicast groups and to send
+// multicast datagrams from a PacketServer (default: chosen by the system). ListenPacket joins
+// the group when its address is a multicast address.
+func WithMulticastInterface(name string) Option { return func(o *options) { o.mcastIface = name } }
+
+// WithSlowCallbackWarning logs a warning (and counts Stats.SlowCallbacks) when a callback runs for
+// d or longer, and when one is still running after d, since a blocked callback stalls every
+// connection of its event loop. Off by default; when on, each callback reads the clock twice.
+func WithSlowCallbackWarning(d time.Duration) Option { return func(o *options) { o.slowCallback = d } }
+
 // WithLogger receives warnings about failures the server recovers from (accept errors,
 // zero-copy fallback) and debug messages (timeouts). By default nothing is logged.
 func WithLogger(l *slog.Logger) Option { return func(o *options) { o.logger = l } }
@@ -180,7 +207,8 @@ func newServer(network, address string, h Handler, opts []Option) (*Server, erro
 		opt(&o)
 	}
 	// Unix sockets do not support SO_REUSEPORT (all rings share one listening socket)
-	sockOpts := socket.SocketOptions{ReusePort: o.reusePort && network != "unix"}
+	sockOpts := socket.SocketOptions{ReusePort: o.reusePort && network != "unix" && o.balance == BalanceKernel,
+		SocketRecvBuffer: o.recvBuf, SocketSendBuffer: o.sendBuf}
 	if o.noDelay {
 		sockOpts.TCPNoDelay = socket.TCPNoDelay
 	} else {
@@ -225,6 +253,28 @@ func newServer(network, address string, h Handler, opts []Option) (*Server, erro
 		rn.tlsServer = o.tlsConfig
 		rn.tlsClient = o.dialTLSConfig
 		rn.ktls = !o.noKTLS
+		rn.keepAlive, rn.recvBuf, rn.sendBuf = o.keepAlive, o.recvBuf, o.sendBuf
+		rn.slowCallback = o.slowCallback
+	}
+	if o.balance != BalanceKernel && len(rings) > 1 && network != "" {
+		b := &balancer{lb: o.balance, rings: rings}
+		for i, rn := range rings {
+			rn.balancer = b
+			rn.noAccept = i > 0 // ring 0 accepts for everyone on the shared listening socket
+		}
+	}
+	if o.keepAlive > 0 && network != "unix" {
+		// Accepted sockets inherit keepalive from the listening socket
+		done := map[int]bool{}
+		for _, rn := range rings {
+			if rn.SocketFd >= 0 && !done[rn.SocketFd] {
+				done[rn.SocketFd] = true
+				if err := setKeepAlive(rn.SocketFd, o.keepAlive); err != nil {
+					closeListeners(rings)
+					return nil, fmt.Errorf("uringnet: TCP keepalive: %w", err)
+				}
+			}
+		}
 	}
 	if rings[0].SocketFd >= 0 {
 		if sa, err := unix.Getsockname(rings[0].SocketFd); err == nil {

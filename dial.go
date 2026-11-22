@@ -177,9 +177,15 @@ func (rn *URingNet) connect(sa unix.Sockaddr, domain int, req *dialReq) {
 		req.done(nil, err)
 		return
 	}
-	if domain != unix.AF_UNIX && rn.noDelay {
-		unix.SetsockoptInt(fd, unix.IPPROTO_TCP, unix.TCP_NODELAY, 1)
+	if domain != unix.AF_UNIX {
+		if rn.noDelay {
+			unix.SetsockoptInt(fd, unix.IPPROTO_TCP, unix.TCP_NODELAY, 1)
+		}
+		if rn.keepAlive > 0 {
+			setKeepAlive(fd, rn.keepAlive)
+		}
 	}
+	setSocketBuffers(fd, rn.recvBuf, rn.sendBuf)
 	raw, err := rawSockaddr(sa)
 	if err != nil {
 		unix.Close(fd)

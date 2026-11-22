@@ -4,7 +4,17 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/). Before v1.0.0, minor versions may change the API.
 
-## [Unreleased]
+## [v0.4.0] - 2026-11-23
+
+Closes gaps with gnet and the standard library found in a comparison. No breaking changes.
+
+### Added
+- `WithLoadBalancing`: `BalanceKernel` (default), `BalanceRoundRobin`, `BalanceLeastConnections`,
+  `BalanceSourceAddrHash`.
+- Incremental reading: `Conn.Peek`, `Conn.Next`, `Conn.Discard`, `Conn.InboundBuffered`.
+- `WithTCPKeepAlive`, `WithSocketBuffers`.
+- `WithSlowCallbackWarning` with a watchdog for callbacks that do not return; `Stats.SlowCallbacks`.
+- UDP multicast: `ListenPacket` joins a multicast group address; `WithMulticastInterface`.
 
 ### Changed
 - epoll backend: completions run after each fd's events instead of after the whole `epoll_wait` batch, recv
@@ -100,6 +110,7 @@ Pre-release of the rebuilt core with the hardening above, before the API rework.
 
 Last release of the original implementation.
 
+[v0.4.0]: https://github.com/y001j/uringnet/compare/v0.3.0...v0.4.0
 [v0.3.0]: https://github.com/y001j/uringnet/compare/v0.2.0...v0.3.0
 [v0.2.0]: https://github.com/y001j/uringnet/compare/v0.1.0...v0.2.0
 [v0.1.0]: https://github.com/y001j/uringnet/compare/v0.0.3-alpha...v0.1.0

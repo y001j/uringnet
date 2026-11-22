@@ -125,6 +125,20 @@ data already written is still sent before closing. `OnClose` receives the first 
 - **Graceful shutdown**: `Shutdown(ctx)` stops accepting (`shutdown` on the listening sockets), marks every
   connection to close after flushing, waits until all are gone or `ctx` ends, then closes the rest.
 
+## Load balancing, inbound buffering and slow callbacks
+
+- **Load balancing**: by default each ring has its own `SO_REUSEPORT` listening socket and the kernel hashes new
+  connections over them. With `BalanceRoundRobin`, `BalanceLeastConnections` or `BalanceSourceAddrHash` the
+  rings share one socket, only ring 0 accepts, and each accepted fd is posted to the chosen ring, which opens the
+  connection there. Connections in transit count towards their ring's load, so a burst does not all go to one ring.
+- **Inbound API**: `Peek`/`Next`/`Discard` read "kept bytes + current data". Bytes still in the receive buffer
+  are returned as slices of it; only a read spanning both copies the needed part behind the kept bytes. When
+  `OnTraffic` returns, unconsumed bytes are kept (copied) only if the connection used the API or already had
+  kept bytes, so connections that only use `data` stay on the zero-copy path.
+- **Slow callbacks**: with `WithSlowCallbackWarning`, each callback stores its start time in an atomic; a callback
+  that returns late is logged and counted, and a watchdog goroutine logs one that is still running, which a
+  measurement after the call could never report.
+
 ## Outgoing connections, UDP and framing
 
 - **Dial**: a socket is created on the ring and connected with `IORING_OP_CONNECT`; name resolution runs on a

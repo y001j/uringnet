@@ -378,7 +378,9 @@ func (c *conn) deliverPlain(data []byte) {
 	}
 	outer := c.batching
 	c.batching = true
+	t0 := c.rn.cbBegin()
 	c.rn.h.traffic(c, data)
+	c.rn.cbEnd(t0, "OnTraffic", c.fd)
 	c.batching = outer
 	if !outer {
 		c.flush()

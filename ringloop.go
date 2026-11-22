@@ -84,6 +84,9 @@ func (loop *Ringloop) RunMany() {
 		rn.h.boot(rn)
 		rn.loop.Post(rn.armAccept)
 		rn.loop.Post(rn.startTimeouts)
+		if rn.slowCallback > 0 {
+			go rn.watchCallbacks(loop.stop)
+		}
 	}
 	loop.startTicker()
 }

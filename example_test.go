@@ -4,6 +4,7 @@
 package uringnet_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/binary"
@@ -244,6 +245,33 @@ func ExampleWithTLS() {
 	}
 	srv, err := uringnet.Listen("tcp", ":8443", echo{},
 		uringnet.WithTLS(&tls.Config{Certificates: []tls.Certificate{cert}}))
+	if err != nil {
+		log.Fatal(err)
+	}
+	srv.Serve()
+}
+
+// lineReader handles a protocol of lines with the incremental read API. A line split over several
+// receives is kept by the connection until it is complete.
+type lineReader struct{ uringnet.BuiltinHandler }
+
+func (lineReader) OnTraffic(c *uringnet.Conn, _ []byte) uringnet.Action {
+	for {
+		buf, _ := c.Peek(-1) // everything received and not consumed yet
+		i := bytes.IndexByte(buf, '\n')
+		if i < 0 {
+			return uringnet.None // wait for the rest of the line
+		}
+		line, _ := c.Next(i + 1)
+		c.Write(line) // echo the line
+	}
+}
+
+func ExampleConn_Peek() {
+	srv, err := uringnet.Listen("tcp", ":7000", lineReader{},
+		uringnet.WithLoadBalancing(uringnet.BalanceLeastConnections),
+		uringnet.WithTCPKeepAlive(30*time.Second),
+		uringnet.WithSlowCallbackWarning(100*time.Millisecond))
 	if err != nil {
 		log.Fatal(err)
 	}

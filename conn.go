@@ -6,6 +6,7 @@ package uringnet
 import (
 	"crypto/tls"
 	stderrors "errors"
+	"io"
 	"net"
 
 	"golang.org/x/sys/unix"
@@ -67,9 +68,97 @@ func (BuiltinHandler) OnShutdown(*Server)             {}
 // Methods other than AsyncWrite and AsyncClose must be called on the connection's event
 // loop thread, that is from a Handler callback.
 type Conn struct {
-	c       *conn
-	ctx     interface{}
-	pending []byte // Framed: incomplete frame
+	c            *conn
+	ctx          interface{}
+	framePending []byte // Framed: incomplete frame
+
+	// Inbound API (Peek, Next, Discard): bytes kept from earlier OnTraffic calls, then the current data
+	in     []byte // owned
+	inOff  int
+	cur    []byte // data of the running OnTraffic, borrowed from the receive buffer
+	curOff int
+	inUsed bool // the inbound API was used during the running OnTraffic
+}
+
+// InboundBuffered returns the number of received bytes not consumed yet with Next or Discard: those
+// kept from earlier OnTraffic calls plus the current data.
+func (cn *Conn) InboundBuffered() int { return len(cn.in) - cn.inOff + len(cn.cur) - cn.curOff }
+
+// Peek returns the next n received bytes without consuming them (n < 0: all of them). With fewer
+// than n buffered it returns what there is and io.ErrShortBuffer. The bytes are valid until
+// OnTraffic returns; when they lie in the receive buffer, writing them back sends them in place.
+//
+// Peek, Next and Discard read "the stream" rather than the current chunk: bytes not consumed when
+// OnTraffic returns are kept and come first next time. Use either them or OnTraffic's data
+// parameter for a connection, not both. Connections that never call them pay nothing.
+func (cn *Conn) Peek(n int) ([]byte, error) {
+	cn.inUsed = true
+	buffered := cn.InboundBuffered()
+	var err error
+	if n < 0 {
+		n = buffered
+	} else if n > buffered {
+		n, err = buffered, io.ErrShortBuffer
+	}
+	inLen := len(cn.in) - cn.inOff
+	switch {
+	case inLen == 0:
+		return cn.cur[cn.curOff : cn.curOff+n], err // straight from the receive buffer
+	case n <= inLen:
+		return cn.in[cn.inOff : cn.inOff+n], err
+	}
+	// The bytes span kept data and the current data: move what is needed behind the kept data
+	need := n - inLen
+	cn.in = append(cn.in, cn.cur[cn.curOff:cn.curOff+need]...)
+	cn.curOff += need
+	return cn.in[cn.inOff : cn.inOff+n], err
+}
+
+// Next returns the next n received bytes and consumes them, like Peek followed by Discard.
+func (cn *Conn) Next(n int) ([]byte, error) {
+	b, err := cn.Peek(n)
+	cn.Discard(len(b))
+	return b, err
+}
+
+// Discard consumes the next n received bytes (n < 0: all of them) and returns how many it consumed.
+func (cn *Conn) Discard(n int) int {
+	cn.inUsed = true
+	if n < 0 || n > cn.InboundBuffered() {
+		n = cn.InboundBuffered()
+	}
+	done := 0
+	if inLen := len(cn.in) - cn.inOff; inLen > 0 {
+		k := n
+		if k > inLen {
+			k = inLen
+		}
+		cn.inOff += k
+		done = k
+	}
+	cn.curOff += n - done
+	return n
+}
+
+// beginTraffic and endTraffic bracket OnTraffic for the inbound API.
+func (cn *Conn) beginTraffic(data []byte) {
+	cn.cur, cn.curOff, cn.inUsed = data, 0, false
+}
+
+func (cn *Conn) endTraffic() {
+	rest := cn.cur[cn.curOff:]
+	if cn.inUsed || len(cn.in) > cn.inOff {
+		// Keep what was not consumed, after anything kept before (copied out of the receive buffer)
+		if cn.inOff > 0 {
+			cn.in = append(cn.in[:0], cn.in[cn.inOff:]...)
+			cn.inOff = 0
+		}
+		cn.in = append(cn.in, rest...)
+		if len(cn.in) == 0 && cap(cn.in) > 64<<10 {
+			cn.in = nil
+		}
+	}
+	cn.cur, cn.curOff = nil, 0
 }
 
 // Write queues b for sending and returns len(b). Data is sent in order. Unless b lies
@@ -186,7 +275,12 @@ func (a apiHandler) shutdown(*URingNet) {}
 
 func (a apiHandler) open(c *conn) { c.apiAction(a.h.OnOpen(&c.api), a.s) }
 
-func (a apiHandler) traffic(c *conn, data []byte) { c.apiAction(a.h.OnTraffic(&c.api, data), a.s) }
+func (a apiHandler) traffic(c *conn, data []byte) {
+	c.api.beginTraffic(data)
+	action := a.h.OnTraffic(&c.api, data)
+	c.api.endTraffic()
+	c.apiAction(action, a.s)
+}
 
 func (a apiHandler) written(*conn) {}
 
