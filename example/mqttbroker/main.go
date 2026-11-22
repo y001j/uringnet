@@ -23,6 +23,7 @@ func main() {
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
 	broker := mqtt.NewBroker(mqtt.Config{
+		SessionExpiry: 24 * time.Hour, // remove sessions of devices offline for a day
 		OnPublish: func(m *mqtt.Message) {
 			if *verbose {
 				log.Info("publish", "client", m.ClientID, "topic", m.Topic, "qos", m.QoS, "bytes", len(m.Payload))
