@@ -1,11 +1,8 @@
 # UringNet
 
 [![Go Report Card](https://goreportcard.com/badge/github.com/y001j/UringNet)](https://goreportcard.com/report/github.com/y001j/UringNet)
-![https://codecov.io/gh/jceb/vim-orgmode](https://codecov.io/gh/y001j/uringnet/branch/master/graph/badge.svg)
 [![Build](https://github.com/y001j/uringnet/actions/workflows/go.yml/badge.svg?branch=master)](https://github.com/y001j/uringnet/actions/workflows/go.yml)
 [![GoDoc](https://godoc.org/github.com/y001j/uringnet?status.svg)](https://pkg.go.dev/github.com/y001j/uringnet)
-
-![logo](https://pic.maienzx.com/qiniuPic/202310031719836.png)
 
 ## Introduction
 
@@ -229,6 +226,11 @@ docker run --rm --security-opt seccomp=unconfined -v "$PWD":/src -w /src golang:
 
 ### Results: recommended configuration (Linux 6.17)
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/bench_throughput_dark.svg">
+  <img alt="Throughput relative to epoll for gnet and uringnet in 14 scenarios" src="docs/images/bench_throughput_light.svg">
+</picture>
+
 uringnet with incremental buffers (32 x 64KB per ring). Throughput relative to epoll; **bold** = fastest.
 
 | Connections, in flight, size | epoll | gnet | uringnet, no polling | uringnet, always polling | uringnet, adaptive polling |
@@ -249,6 +251,11 @@ uringnet with incremental buffers (32 x 64KB per ring). Throughput relative to e
 | 512, 8, 16KB | 136k/s | **2.13** | 1.84 | 1.87 | 1.78 |
 
 Median latency / server CPU:
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/bench_latency_dark.svg">
+  <img alt="Median latency of epoll, gnet and uringnet at low and medium load" src="docs/images/bench_latency_light.svg">
+</picture>
 
 | Connections, in flight, size | epoll | gnet | uringnet, no polling | uringnet, adaptive polling |
 |---|---|---|---|---|
@@ -359,6 +366,9 @@ python3 bench/scripts/summarize.py r.txt epoll
 
 `SERVERS="epoll gnet uringnet uringnet-inc uringnet-spin"` selects the servers; `servers/uringnet` takes `-inc`, `-spin`,
 `-spinfixed`, `-bufs`, `-bufsize` and more (see [bench/README.md](bench/README.md)).
+
+The charts above are generated from the result tables by `python3 bench/scripts/charts.py` (no dependencies); edit the data
+at the top of that script and rerun it after new measurements.
 
 ## Known Issues
 
