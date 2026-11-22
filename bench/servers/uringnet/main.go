@@ -26,6 +26,7 @@ func main() {
 	bufSize := flag.Int("bufsize", 16384, "receive buffer size")
 	spin := flag.Duration("spin", 0, "busy-poll time before blocking, e.g. 50us")
 	zc := flag.Int("zc", 0, "zero-copy send threshold in bytes, 0 disables")
+	inc := flag.Bool("inc", false, "incremental buffer ring (Linux 6.12+, experimental)")
 	bundle := flag.String("bundle", "auto", "recv bundles: auto (Linux 6.16+), on (force; 6.10-6.15 kernels may corrupt data), off")
 	flag.Parse()
 	if flag.NArg() != 1 {
@@ -41,6 +42,7 @@ func main() {
 		rn.BufferSize = *bufSize
 		rn.SpinTime = *spin
 		rn.ZeroCopyThreshold = *zc
+		rn.IncrementalBuffers = *inc
 		switch *bundle {
 		case "on":
 			rn.RecvBundle = uringnet.BundleOn

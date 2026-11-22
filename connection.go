@@ -96,6 +96,15 @@ func (c *conn) onRecv(res int32, flags uint32) {
 		for _, b := range bufs {
 			c.deliver(b.Bid, b.Data)
 		}
+	} else if rn.inc {
+		// 增量消费：数据位于大缓冲区中上一次数据之后；内核用完且没有片段被引用时才归还
+		if bid, data, more, ok := rn.br.GetIncremental(res, flags); ok {
+			if !more {
+				rn.incDone[bid] = true
+			}
+			c.deliverInc(bid, data)
+			rn.maybeRecycleInc(bid)
+		}
 	} else if bid, data, ok := rn.br.Get(res, flags); ok {
 		c.deliver(bid, data)
 	}
@@ -143,6 +152,25 @@ func (c *conn) deliver(bid uint16, data []byte) {
 	}
 }
 
+// deliverInc 是增量消费模式下的 deliver：原地发送的片段给所在缓冲区加一个引用
+func (c *conn) deliverInc(bid uint16, data []byte) {
+	rn := c.rn
+	if len(data) == 0 || c.closed {
+		return
+	}
+	c.ud.Buffer = data
+	c.ud.BufSize = int32(len(data))
+	action := rn.Handler.OnTraffic(&c.ud, rn)
+	if c.handleAction(action, data, int32(bid)) {
+		if rn.incRefs[bid] == 0 {
+			rn.incPinned++
+		}
+		rn.incRefs[bid]++
+	}
+	c.ud.Buffer = nil
+	c.ud.BufSize = 0
+}
+
 // handleAction 处理回调返回的动作。recvBuf/bid 为本次接收数据所在的缓冲区
 // （OnOpen 时为 nil/-1）。返回 true 表示该缓冲区被发送队列占用，不能立即归还。
 func (c *conn) handleAction(action Action, recvBuf []byte, bid int32) (held bool) {
@@ -182,13 +210,25 @@ func (c *conn) writeFrom(b, recvBuf []byte, bid int32) bool {
 	if len(b) == 0 || c.closed {
 		return false
 	}
-	if bid >= 0 && len(c.q) == 0 && c.rn.held < c.rn.maxHeld && within(b, recvBuf) {
+	if bid >= 0 && c.canHold(uint16(bid)) && within(b, recvBuf) {
 		c.rn.held++
 		c.enqueue(seg{b: b, bid: bid, release: nil})
 		return true
 	}
 	c.write(b)
 	return false
+}
+
+// canHold 判断能否原地发送 bid 中的数据。
+// 普通模式：只在发送队列为空时，且被占用的缓冲区少于 maxHeld。
+// 增量消费模式：数据只占大缓冲区的一小段，允许一个连接原地发送多段；限制的是被引用的缓冲区数量
+// （同一缓冲区中再多引用一段不会多占缓冲区）。
+func (c *conn) canHold(bid uint16) bool {
+	rn := c.rn
+	if rn.inc {
+		return rn.incRefs[bid] > 0 || rn.incPinned < rn.maxHeld
+	}
+	return len(c.q) == 0 && rn.held < rn.maxHeld
 }
 
 // write 把 b 拷贝进发送队列：尽量追加到队尾的拷贝段（在途 send 覆盖的段不能追加）
@@ -429,12 +469,35 @@ func (rn *URingNet) maybeReleaseZC(ref *zcRef) {
 // releaseBuf 归还被发送占用的接收缓冲区，或通知用户缓冲区可复用
 func (rn *URingNet) releaseBuf(bid int32, release func()) {
 	if bid >= 0 {
-		rn.br.Recycle(uint16(bid))
 		rn.held--
-		rn.rearmStarved(rn.held == 0)
+		if rn.inc {
+			b := uint16(bid)
+			if rn.incRefs[b]--; rn.incRefs[b] == 0 {
+				rn.incPinned--
+				rn.maybeRecycleInc(b)
+			}
+			// 引用归零时缓冲区可能尚未被内核用完（不会归还、也就不会唤醒等待的连接）；
+			// 没有任何片段被占用时，ring 中必然有可用空间，唤醒全部等待的连接，否则它们会永远等下去
+			if rn.held == 0 {
+				rn.rearmStarved(true)
+			}
+		} else {
+			rn.br.Recycle(uint16(bid))
+			rn.rearmStarved(rn.held == 0)
+		}
 	}
 	if release != nil {
 		release()
+	}
+}
+
+// maybeRecycleInc 在内核已用完且没有片段引用时归还增量消费模式的缓冲区
+func (rn *URingNet) maybeRecycleInc(bid uint16) {
+	if rn.incDone[bid] && rn.incRefs[bid] == 0 {
+		rn.incDone[bid] = false
+		rn.br.Recycle(bid)
+		// 一个大缓冲区能容纳许多连接的数据：唤醒全部等待的连接
+		rn.rearmStarved(true)
 	}
 }
 

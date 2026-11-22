@@ -57,6 +57,11 @@ type URingNet struct {
 	// 可能已回移到部分稳定版本），BundleOn 强制启用，仅用于测试或确认内核已包含修复的场景。
 	RecvBundle BundleMode
 
+	// IncrementalBuffers（实验性）使用增量消费的 buffer ring（Linux 6.12+）：少量大缓冲区被多次接收
+	// 连续填充，一个连接可以原地发送多段数据而不拷贝。建议配合较大的 BufferSize（如 64KB）和较少的
+	// 缓冲区数量。启用后不使用 recv bundle；内核不支持时自动退回普通模式。
+	IncrementalBuffers bool
+
 	index      int
 	entries    uint32
 	ownsSocket bool // SocketFd 是否由本实例独占（ReusePort 时每个实例一个监听 socket）
@@ -76,7 +81,11 @@ type URingNet struct {
 	zcSends     int  // SEND_ZC 次数（测试用）
 	bundle      bool // 是否使用 recv bundle
 	bundleBufs  []iouring.BundleBuf
-	gatherSends int // sendmsg 聚集发送次数（测试用）
+	inc         bool    // 是否使用增量消费的 buffer ring
+	incRefs     []int32 // 增量消费：缓冲区被原地发送的片段引用数
+	incDone     []bool  // 增量消费：内核已用完该缓冲区
+	incPinned   int     // 增量消费：有片段引用的缓冲区数量
+	gatherSends int     // sendmsg 聚集发送次数（测试用）
 
 	connCount atomic.Int64
 
@@ -264,11 +273,17 @@ func (rn *URingNet) start(bufferCount int) error {
 		rn.BufferSize = DefaultBufferSize
 	}
 	cfg := iouring.LoopConfig{
-		Entries:     rn.entries,
-		BufferRings: []iouring.BufferRingConfig{{Count: bufferCount, Size: rn.BufferSize, Fixed: rn.ZeroCopyThreshold > 0}},
-		SpinTime:    rn.SpinTime,
+		Entries: rn.entries,
+		BufferRings: []iouring.BufferRingConfig{{Count: bufferCount, Size: rn.BufferSize, Fixed: rn.ZeroCopyThreshold > 0,
+			Incremental: rn.IncrementalBuffers}},
+		SpinTime: rn.SpinTime,
 	}
 	l, err := iouring.NewLoop(cfg)
+	if err != nil && cfg.BufferRings[0].Incremental {
+		// 内核不支持增量消费（6.12 之前），退回普通 buffer ring
+		cfg.BufferRings[0].Incremental = false
+		l, err = iouring.NewLoop(cfg)
+	}
 	if err != nil && cfg.BufferRings[0].Fixed {
 		// 注册固定缓冲区失败（通常是 RLIMIT_MEMLOCK 不足），退回不注册：SEND_ZC 仍可用，只是逐次 pin 页
 		cfg.BufferRings[0].Fixed = false
@@ -280,7 +295,15 @@ func (rn *URingNet) start(bufferCount int) error {
 	rn.loop = l
 	rn.br = l.BufferRing(0)
 	rn.maxHeld = bufferCount / 2
-	rn.bundle = l.Features()&iouring_syscall.IORING_FEAT_RECVSEND_BUNDLE != 0 &&
+	if cfg.BufferRings[0].Incremental {
+		rn.inc = true
+		rn.incRefs = make([]int32, bufferCount)
+		rn.incDone = make([]bool, bufferCount)
+		// 被引用的缓冲区仍能继续接收（写满前不会挡住接收），上限可以比普通模式宽松得多：
+		// 实测允许占住除 1 个外的全部缓冲区时用户态拷贝最少、吞吐最高
+		rn.maxHeld = bufferCount - 1
+	}
+	rn.bundle = !rn.inc && l.Features()&iouring_syscall.IORING_FEAT_RECVSEND_BUNDLE != 0 &&
 		(rn.RecvBundle == BundleOn || (rn.RecvBundle == BundleAuto && bundleSafeKernel()))
 	rn.fixedIdx = rn.br.FixedIndex()
 	rn.conns = make(map[int]*conn)

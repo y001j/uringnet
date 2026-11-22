@@ -460,6 +460,94 @@ func TestRecvBundleEcho(t *testing.T) {
 	runEchoClients(t, addr, 32, []int{1, 100, 2048, 2049, 65536, 1 << 20})
 }
 
+// 增量消费的 buffer ring：少量大缓冲区，多个连接的数据交错写入，原地发送多段
+func TestIncrementalBuffersEcho(t *testing.T) {
+	h := &testHandler{}
+	loop, addr := startServerCfg(t, h, 2, false, 8, func(rn *URingNet) {
+		rn.IncrementalBuffers = true
+	})
+	defer loop.Shutdown()
+	if !loop.RingNet[0].inc {
+		t.Skip("kernel does not support incremental buffer rings (needs 6.12+)")
+	}
+	runEchoClients(t, addr, 32, []int{1, 100, 2048, 2049, 65536, 1 << 20})
+	waitFor(t, func() bool { return h.closed.Load() == 32 }, "OnClose x32")
+	for _, rn := range loop.RingNet {
+		waitFor(t, func() bool {
+			res := make(chan [2]int, 1)
+			rn.Post(func() { res <- [2]int{rn.held, rn.incPinned} })
+			r := <-res
+			return r[0] == 0 && r[1] == 0
+		}, "all buffer references released")
+	}
+}
+
+// 增量消费：少量大缓冲区、大量连接时缓冲区会耗尽（-ENOBUFS），连接在任意时刻突然关闭。
+// 回归测试：曾经出现等待缓冲区的连接再也不被唤醒、服务端卡死的问题。
+func TestIncrementalBuffersNoStall(t *testing.T) {
+	h := &testHandler{}
+	loop, addr := startServerCfg(t, h, 1, false, 8, func(rn *URingNet) {
+		rn.IncrementalBuffers = true
+		rn.BufferSize = 128 << 10
+	})
+	defer loop.Shutdown()
+	rn := loop.RingNet[0]
+	if !rn.inc {
+		t.Skip("kernel does not support incremental buffer rings (needs 6.12+)")
+	}
+	for _, ph := range [][3]int{{512, 1, 16384}, {512, 8, 16384}, {64, 8, 16384}} {
+		conns, depth, size := ph[0], ph[1], ph[2]
+		var wg sync.WaitGroup
+		var ops atomic.Int64
+		stop := make(chan struct{})
+		for i := 0; i < conns; i++ {
+			c, err := net.Dial("tcp4", addr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wg.Add(1)
+			go func(c net.Conn) {
+				defer wg.Done()
+				defer c.Close()
+				msg := make([]byte, size*depth)
+				buf := make([]byte, size*depth)
+				for {
+					select {
+					case <-stop:
+						return
+					default:
+					}
+					if _, err := c.Write(msg); err != nil {
+						return
+					}
+					c.SetReadDeadline(time.Now().Add(2 * time.Second))
+					if _, err := io.ReadFull(c, buf); err != nil {
+						return
+					}
+					ops.Add(1)
+				}
+			}(c)
+		}
+		var last int64
+		for i := 0; i < 4; i++ {
+			time.Sleep(250 * time.Millisecond)
+			if n := ops.Load(); n == last && i > 0 {
+				t.Fatalf("phase %v stalled after %d ops", ph, n)
+			} else {
+				last = n
+			}
+		}
+		close(stop) // 在任意时刻关闭，可能有在途的数据
+		wg.Wait()
+		waitFor(t, func() bool {
+			res := make(chan [4]int, 1)
+			rn.Post(func() { res <- [4]int{len(rn.conns), rn.held, rn.incPinned, len(rn.starved)} })
+			r := <-res
+			return r == [4]int{}
+		}, fmt.Sprintf("clean state after phase %v", ph))
+	}
+}
+
 func TestUnsupportedProtocol(t *testing.T) {
 	if _, err := NewMany(NetAddress{AddrType: socket.Udp4, Address: "127.0.0.1:0"}, 64, false, 1, socket.SocketOptions{}, &testHandler{}); err == nil {
 		t.Fatal("expected error for udp")

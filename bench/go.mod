@@ -4,7 +4,7 @@ go 1.20
 
 require (
 	github.com/panjf2000/gnet/v2 v2.3.3
-	github.com/y001j/iouring-go v0.0.0-20261121220609-b78cda6b08c0
+	github.com/y001j/iouring-go v0.0.0-20261122040431-a3dfd8ca1609
 	github.com/y001j/uringnet v0.0.0
 	golang.org/x/sys v0.12.0
 )

@@ -104,6 +104,7 @@ func main() {
 | `URingNet.SpinTime` | busy-poll before blocking (e.g. `50*time.Microsecond`): lower latency at the cost of CPU |
 | `URingNet.ZeroCopyThreshold` | enable zero-copy send (`IORING_OP_SEND_ZC`) for writes of at least this many bytes; 0 disables |
 | `URingNet.RecvBundle` | recv bundles: one completion can carry several receive buffers. `BundleAuto` (default) enables them on Linux 6.16+ only; see below |
+| `URingNet.IncrementalBuffers` | **experimental**: incremental buffer ring (Linux 6.12+), best with `BufferSize` 64KB and 32+ buffers; see below |
 | `SetLoops(rings, bufferCount)` | create the event loops; `bufferCount` (receive buffers per ring) is rounded up to a power of 2 (max 32768). See *Sizing receive buffers* below |
 | `UserData.WriteNoCopy(b, release)` | queue `b` without copying; `release` is called once the kernel no longer uses it |
 | `Ringloop.RunMany()` / `Wait()` / `Shutdown()` | start accepting / block until shut down / close all connections and loops |
@@ -140,6 +141,28 @@ Kernels 6.10–6.15 have bugs that can leave **gaps in the received data** when 
 `3a08988123c8` in 6.15 and `26ec15e4b0c1`/`178b8ff66ff8` in 6.16, all tagged for stable). We reproduced the corruption
 on 6.10 and verified correct data on 6.17. Therefore `BundleAuto` only enables bundles on 6.16+. `BundleOn` forces them
 (only if you know your kernel has the fixes), and `BundleOff` disables them.
+
+### Incremental buffers (experimental)
+
+`IncrementalBuffers = true` registers the receive ring with `IOU_PBUF_RING_INC` (Linux 6.12+). Instead of using one whole buffer
+per receive, the kernel appends each receive after the previous data in the same buffer, so a few large buffers are packed
+with data from many connections. Each in-place send references a slice of a buffer; a buffer goes back to the kernel once
+the kernel has finished filling it and no slice is referenced. Because a referenced buffer can still receive data, one
+connection can send several received slices in place, which avoids most user-space copies.
+
+```go
+for _, rn := range ringNets {
+	rn.IncrementalBuffers = true
+	rn.BufferSize = 64 << 10
+}
+loop, err := uringnet.SetLoops(ringNets, 32) // 32 x 64KB per ring
+```
+
+- In the Linux 6.17 benchmark this was the fastest uringnet configuration: ahead of gnet with 512 connections (small messages
+  by ~15%), and within 5–10% of gnet for bulk pipelined transfers (see [Benchmark](#benchmark)).
+- Use at least 32 buffers: with 16 buffers, 512 connections sending 16KB each ran out of buffers and slowed down.
+- Recv bundles are not used in this mode. On kernels without support it falls back to the normal buffer ring.
+- It is new code and off by default; validate it with your own traffic before enabling it in production.
 
 ### Zero-copy send
 
@@ -218,6 +241,23 @@ Median latency (p50) and server CPU:
 | 512, 128B | 2.39M | 0.99 | **1.07** | 1.04 |
 | 512, 16KB | 154k | **1.82** | 1.43 | 1.61 |
 
+### Incremental buffers (experimental)
+
+Same setup; uringnet with `IncrementalBuffers`, 32 x 64KB buffers per ring:
+
+| Connections, `p`, size | epoll | gnet | uringnet (bundles, 64 x 16KB) | uringnet, incremental |
+|---|---|---|---|---|
+| 64, 1, 128B | 197k | 1.16 | 1.10 | **1.19** |
+| 64, 1, 16KB | 152k | **1.04** | 0.93 | 0.92 |
+| 64, 8, 128B | 1.69M | **1.14** | 1.01 | 1.09 |
+| 64, 8, 16KB | 205k | **1.68** | 1.51 | 1.60 |
+| 512, 1, 128B | 340k | 0.99 | 0.97 | **1.16** |
+| 512, 1, 16KB | 215k | 0.99 | 0.96 | **1.05** |
+| 512, 8, 128B | 2.66M | 1.00 | 0.96 | **1.14** |
+| 512, 8, 16KB | 172k | **1.75** | 1.52 | 1.57 |
+
+Median latency at 512 connections, `p = 8`, 16KB: epoll 23.3ms, gnet 12.3ms, uringnet with bundles 22.4ms, incremental 10.9ms.
+
 ### Reading the results
 
 - **When the server is busy** (512 connections, server CPU ≥ 94%), uringnet matches or slightly beats epoll and gnet.
@@ -225,6 +265,8 @@ Median latency (p50) and server CPU:
   sleeps and wakes up more often than epoll per request, so it trails epoll by up to ~20%. With `SpinTime = 50µs` it leads both
   epoll and gnet and halves the median latency. The cost is CPU: about twice the server CPU at the lowest load, and almost nothing
   extra once the server is busy. A 10µs spin was mostly too short to make a difference in this environment.
+- **Incremental buffers** close most of the remaining gap: with them uringnet leads at 512 connections and is within 5–10%
+  of gnet for bulk pipelined transfers.
 - **Bulk pipelined transfers** are where gnet is strongest. gnet reads up to 64KB per connection into one buffer that stays hot
   in the CPU cache, and only when the event loop gets to that connection. io_uring provided buffers are filled by the kernel as
   soon as data arrives, so every connection with pending data holds a buffer. Recv bundles narrow the gap (1.43x → 1.61x of epoll at

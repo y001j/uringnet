@@ -9,11 +9,11 @@
 #   DEPTHS  每连接在途请求数列表（pipelining），默认 "1"
 #   ROUNDS  轮数（结果取中位数），默认 3
 #   DUR     每次测试时长，默认 3s
-#   SERVERS 参与测试的服务端，默认全部：stdcopy std epoll gnet rawloop uringnet uringnet-spin uringnet-zc
+#   SERVERS 参与测试的服务端，默认全部：stdcopy std epoll gnet rawloop uringnet uringnet-spin uringnet-zc uringnet-inc
 set -e
 MODE=${MODE:-pingpong}; CONNS=${CONNS:-"1 64 512"}; SIZES=${SIZES:-"128 16384"}; DEPTHS=${DEPTHS:-1}
 ROUNDS=${ROUNDS:-3}; DUR=${DUR:-3s}
-SERVERS=${SERVERS:-"stdcopy std epoll gnet rawloop uringnet uringnet-spin uringnet-zc"}
+SERVERS=${SERVERS:-"stdcopy std epoll gnet rawloop uringnet uringnet-spin uringnet-zc uringnet-inc"}
 BIN=/tmp/bench-bin
 cd "$(dirname "$0")/.."
 mkdir -p $BIN
@@ -34,6 +34,7 @@ for name in $SERVERS; do
     uringnet)      cmd="$BIN/uringnet" ;;
     uringnet-spin) cmd="$BIN/uringnet -spin 50us" ;;
     uringnet-zc)   cmd="$BIN/uringnet -zc 16384" ;;
+    uringnet-inc)  cmd="$BIN/uringnet -inc -bufs 32 -bufsize 65536" ;;
     rawloop)       cmd="env BUFS=256 $BIN/rawloop" ;;
     *)             cmd="$BIN/$name" ;;
   esac
