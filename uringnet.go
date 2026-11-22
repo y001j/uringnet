@@ -129,6 +129,7 @@ type URingNet struct {
 	starved     []*conn // 因缓冲区耗尽（-ENOBUFS）而暂停接收的连接
 	stopping    bool
 	draining    bool // 优雅关闭中：不再接受新连接，现有连接发完数据后关闭
+	noDelay     bool // 拨出的 TCP 连接设置 TCP_NODELAY
 	fixedIdx    int  // 接收缓冲区的固定缓冲区下标，-1 表示未注册
 	zcOff       bool // 内核不支持零拷贝时自动关闭
 	zcSends     int  // SEND_ZC 次数（测试用）
@@ -157,6 +158,16 @@ type URingNet struct {
 	bytesIn, bytesOut       uint64
 	enobufs                 uint64 // multishot recv 因缓冲区耗尽（-ENOBUFS）而终止的次数
 	idleCloses, writeCloses uint64
+	dialed                  uint64 // 拨出并建立的连接数
+
+	// UDP（ListenPacket）
+	packet                bool // 数据包模式：没有连接，multishot recvmsg 收数据报
+	ph                    PacketHandler
+	pc                    PacketConn
+	recvMsg               unix.Msghdr // multishot recvmsg 的消息头（只用到地址长度）
+	family                int         // socket 的协议族（AF_INET / AF_INET6）
+	packetsIn, packetsOut uint64
+	truncated, sendErrs   uint64
 
 	connCount atomic.Int64
 
@@ -430,6 +441,14 @@ func (rn *URingNet) start(bufferCount int) error {
 		rn.maxWrite = DefaultMaxWriteBuffer
 	}
 	rn.nopH = func(int32, uint32) {}
+	if rn.packet {
+		rn.family = unix.AF_INET6
+		if sa, err := unix.Getsockname(rn.SocketFd); err == nil {
+			if _, ok := sa.(*unix.SockaddrInet4); ok {
+				rn.family = unix.AF_INET
+			}
+		}
+	}
 	rn.setupTimeouts()
 	return nil
 }
@@ -454,7 +473,11 @@ const (
 )
 
 func (rn *URingNet) armAccept() {
-	if rn.stopping || rn.draining {
+	if rn.stopping || rn.draining || rn.SocketFd < 0 {
+		return
+	}
+	if rn.packet {
+		rn.armRecvMsg()
 		return
 	}
 	rn.acceptArms++
@@ -468,7 +491,7 @@ func (rn *URingNet) onAccept(res int32, flags uint32) {
 		if rn.stopping || rn.draining {
 			unix.Close(int(res))
 		} else {
-			rn.openConn(int(res))
+			rn.openConn(int(res), nil)
 		}
 	}
 	if flags&iouring_syscall.IORING_CQE_F_MORE != 0 || rn.stopping || rn.draining {
@@ -491,8 +514,10 @@ func (rn *URingNet) onAccept(res int32, flags uint32) {
 	rn.after(rn.acceptBackoff, rn.armAccept)
 }
 
-func (rn *URingNet) openConn(fd int) {
+// openConn 为已连接的 fd（accept 或 connect 得到）创建连接并调用 OnOpen；ctx 在 OnOpen 之前设置
+func (rn *URingNet) openConn(fd int, ctx interface{}) *conn {
 	c := newConn(rn, fd)
+	c.api.ctx = ctx
 	rn.conns[fd] = c
 	rn.connCount.Add(1)
 
@@ -504,6 +529,7 @@ func (rn *URingNet) openConn(fd int) {
 	if !c.closed && !c.paused {
 		c.armRecv()
 	}
+	return c
 }
 
 // shutdownLoop 在 Loop 线程中关闭所有连接
@@ -511,7 +537,9 @@ func (rn *URingNet) shutdownLoop() {
 	rn.stopping = true
 	// 对监听 socket 执行 shutdown 立即停止监听并使在途 accept 失败。仅 close 不够：
 	// io_uring 中的 multishot accept 持有文件引用，ring 的释放是异步的，端口会短暂保持监听。
-	unix.Shutdown(rn.SocketFd, unix.SHUT_RD)
+	if rn.SocketFd >= 0 {
+		unix.Shutdown(rn.SocketFd, unix.SHUT_RD)
+	}
 	for _, c := range rn.conns {
 		if c.err == nil {
 			c.err = ErrServerClosed
@@ -527,7 +555,9 @@ func (rn *URingNet) drain() {
 		return
 	}
 	rn.draining = true
-	unix.Shutdown(rn.SocketFd, unix.SHUT_RD)
+	if rn.SocketFd >= 0 {
+		unix.Shutdown(rn.SocketFd, unix.SHUT_RD)
+	}
 	for _, c := range rn.conns {
 		if c.closed {
 			continue

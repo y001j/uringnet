@@ -4,6 +4,20 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/). Before v1.0.0, minor versions may change the API.
 
+## [Unreleased]
+
+### Added
+- Outgoing connections: `Server.Dial`, `Server.DialAsync`, `Conn.DialAsync` (same event loop, for proxies) and
+  `NewClient` for programs that only dial. `Stats.Dialed`.
+- UDP: `ListenPacket`, `PacketServer`, `PacketConn` with multishot `recvmsg`; source addresses as `netip.AddrPort`.
+  UDP counters in `Stats`.
+- Framing: `Framer`, `Framed`, `MessageHandler`, and the `NewLengthField`, `NewDelimiter` and `FixedLength` framers.
+  `ErrFrameTooLarge`.
+- `Server.Stats` and pkg.go.dev examples.
+
+### Fixed
+- `Listen("unix", ...)` failed with "setsockopt: operation not supported" because `SO_REUSEPORT` was set on the unix socket.
+
 ## [v0.1.0] - 2026-11-22
 
 The core was rebuilt on the `Loop` API of [iouring-go](https://github.com/y001j/iouring-go)

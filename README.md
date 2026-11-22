@@ -45,8 +45,8 @@ submits a whole batch of requests and waits for a batch of results.
 
 ### Should You adopt it in your project
 
-UringNet was designed for IoT gateways: many connections, small messages, request/response traffic. It provides TCP and Unix
-stream sockets (no UDP or TLS yet). Consider it if:
+UringNet was designed for IoT gateways: many connections, small messages, request/response traffic. It provides TCP, Unix
+stream sockets and UDP (no TLS yet), outgoing connections and message framing. Consider it if:
 
 - you run Linux 6.0+ (6.16+ for recv bundles) and io_uring is allowed on the host (it is blocked by Docker's and Kubernetes'
   default seccomp profiles), and
@@ -169,6 +169,36 @@ Callback semantics:
 - When the peer shuts down its write side, the data already written is still sent before the connection is closed.
 
 The earlier API (`NewMany`, `SetLoops`, `EventHandler`, `UserData`) still works but is deprecated.
+
+### Outgoing connections
+
+`Server.Dial(ctx, network, address, connCtx)` connects from one of the server's event loops (with `IORING_OP_CONNECT`)
+and returns the `*Conn` once `OnOpen` has run; `connCtx` is set as the connection's context before `OnOpen`, so the
+handler can tell outgoing connections apart. `Dial` blocks, so from a callback use `DialAsync`, which reports through a
+callback on the event loop. `Conn.DialAsync` dials on the same event loop as an existing connection, so the two can
+write to each other directly, which is all a proxy needs (see `ExampleConn_DialAsync`). `NewClient(handler, opts...)`
+runs event loops without a listener for programs that only dial.
+
+### Framing
+
+`Framed(framer, handler)` turns the byte stream into messages: `OnMessage(c, msg)` is called once per complete frame.
+Frames that arrive whole are passed straight from the receive buffer (writing them back is an in-place send); partial
+frames are buffered per connection. Built in: `NewLengthField(headerSize, byteOrder, maxPayload)`,
+`NewDelimiter(delim, maxFrame)` and `FixedLength(n)`; each builds outgoing frames with `AppendFrame`. Implement `Framer`
+for other formats. Oversized frames close the connection with `ErrFrameTooLarge`.
+
+```go
+framer := uringnet.NewLengthField(2, binary.BigEndian, 64<<10)
+srv, err := uringnet.Listen("tcp", ":9000", uringnet.Framed(framer, handler)) // handler has OnMessage
+```
+
+### UDP
+
+`ListenPacket("udp", address, handler, opts...)` opens one socket per ring with `SO_REUSEPORT` and receives with
+multishot `recvmsg` into the provided buffer ring. `OnPacket(pc, data, from)` gets the source as a `netip.AddrPort`,
+so receiving allocates nothing; reply with `pc.WriteTo`, or send from any goroutine with `AsyncWriteTo`. A receive
+buffer must hold a whole datagram plus about 48 bytes; larger datagrams are dropped and counted in
+`Stats.PacketsTruncated`. Bound to port 0 and started with `Start`, a `PacketServer` also works as a UDP client.
 
 ### Sizing receive buffers
 
@@ -418,6 +448,6 @@ at the top of that script and rerun it after new measurements.
   with the default SQ size of 512 (550KB at 4096), plus the receive buffers when zero-copy registers them. With the
   common 8MB limit that is about 110 rings. If `Listen` fails with "out of locked memory", raise `ulimit -l`
   (`LimitMEMLOCK=` for systemd services) or use fewer rings.
-- Only stream sockets (TCP, Unix) are supported; UDP and TLS are not.
+- TLS is not supported.
 - Recv bundles need Linux 6.16+ for correct data (see *Recv bundles*).
 - When accept fails (for example `EMFILE`) it is retried with exponential backoff (5ms up to 1s) and logged with `WithLogger`.

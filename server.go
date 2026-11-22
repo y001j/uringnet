@@ -134,6 +134,14 @@ func WithLogger(l *slog.Logger) Option { return func(o *options) { o.logger = l 
 // Listen creates a Server listening on address. network is "tcp", "tcp4", "tcp6" or
 // "unix". The server does not accept connections until Serve is called.
 func Listen(network, address string, h Handler, opts ...Option) (*Server, error) {
+	if network == "" {
+		return nil, fmt.Errorf("uringnet: empty network")
+	}
+	return newServer(network, address, h, opts)
+}
+
+// newServer 创建 Server；network 为空时不监听（NewClient）
+func newServer(network, address string, h Handler, opts []Option) (*Server, error) {
 	if h == nil {
 		return nil, fmt.Errorf("uringnet: nil Handler")
 	}
@@ -145,16 +153,28 @@ func Listen(network, address string, h Handler, opts ...Option) (*Server, error)
 	if err := checkKernel(); err != nil {
 		return nil, err
 	}
-	sockOpts := socket.SocketOptions{ReusePort: o.reusePort}
+	// Unix socket 不支持 SO_REUSEPORT（所有 ring 共享一个监听 socket）
+	sockOpts := socket.SocketOptions{ReusePort: o.reusePort && network != "unix"}
 	if o.noDelay {
 		sockOpts.TCPNoDelay = socket.TCPNoDelay
 	} else {
 		sockOpts.TCPNoDelay = socket.TCPDelay
 	}
-	rings, err := NewMany(NetAddress{AddrType: socket.NetAddressType(network), Address: address},
-		o.sqSize, false, o.rings, sockOpts, nil)
-	if err != nil {
-		return nil, err
+	var rings []*URingNet
+	if network != "" {
+		var err error
+		rings, err = NewMany(NetAddress{AddrType: socket.NetAddressType(network), Address: address},
+			o.sqSize, false, o.rings, sockOpts, nil)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		if o.rings <= 0 {
+			return nil, fmt.Errorf("uringnet: invalid number of rings %d", o.rings)
+		}
+		for i := 0; i < o.rings; i++ {
+			rings = append(rings, &URingNet{SocketFd: -1, index: i, entries: uint32(o.sqSize)})
+		}
 	}
 	s := &Server{h: h, log: o.logger, rings: rings}
 	if s.log == nil {
@@ -174,9 +194,12 @@ func Listen(network, address string, h Handler, opts ...Option) (*Server, error)
 		rn.IdleTimeout = o.idleTimeout
 		rn.WriteTimeout = o.writeTimeout
 		rn.Logger = s.log
+		rn.noDelay = o.noDelay
 	}
-	if sa, err := unix.Getsockname(rings[0].SocketFd); err == nil {
-		s.addr = sockaddrToNetAddr(sa)
+	if rings[0].SocketFd >= 0 {
+		if sa, err := unix.Getsockname(rings[0].SocketFd); err == nil {
+			s.addr = sockaddrToNetAddr(sa)
+		}
 	}
 	loop, err := SetLoops(rings, o.bufCount)
 	if err != nil {
@@ -190,7 +213,7 @@ func Listen(network, address string, h Handler, opts ...Option) (*Server, error)
 func closeListeners(rings []*URingNet) {
 	closed := map[int]bool{}
 	for _, rn := range rings {
-		if !closed[rn.SocketFd] {
+		if rn.SocketFd >= 0 && !closed[rn.SocketFd] {
 			closed[rn.SocketFd] = true
 			unix.Close(rn.SocketFd)
 		}

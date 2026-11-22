@@ -66,8 +66,9 @@ func (BuiltinHandler) OnShutdown(*Server)             {}
 // Methods other than AsyncWrite and AsyncClose must be called on the connection's event
 // loop thread, that is from a Handler callback.
 type Conn struct {
-	c   *conn
-	ctx interface{}
+	c       *conn
+	ctx     interface{}
+	pending []byte // Framed：尚不完整的帧
 }
 
 // Write queues b for sending and returns len(b). Data is sent in order. Unless b lies

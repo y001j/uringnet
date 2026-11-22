@@ -10,6 +10,7 @@ import "time"
 type Stats struct {
 	Connections   int64  // connections open now
 	Accepted      uint64 // connections accepted
+	Dialed        uint64 // outgoing connections established (Dial, DialAsync)
 	AcceptErrors  uint64 // failed accepts (for example EMFILE); retried with backoff
 	BytesRead     uint64 // bytes received
 	BytesWritten  uint64 // bytes sent
@@ -25,6 +26,12 @@ type Stats struct {
 	BackpressurePauses uint64
 	// ZeroCopySends counts sends made with SEND_ZC (WithZeroCopy).
 	ZeroCopySends uint64
+
+	// UDP (PacketServer)
+	PacketsReceived  uint64 // datagrams delivered to OnPacket
+	PacketsSent      uint64 // datagrams sent
+	PacketsTruncated uint64 // datagrams dropped because they did not fit in a receive buffer
+	SendErrors       uint64 // failed datagram sends
 }
 
 // Stats returns the server's counters. It is safe to call from any goroutine: the counters
@@ -57,6 +64,7 @@ func (rn *URingNet) stats() Stats {
 	return Stats{
 		Connections:         int64(len(rn.conns)),
 		Accepted:            rn.accepted,
+		Dialed:              rn.dialed,
 		AcceptErrors:        rn.acceptErrs,
 		BytesRead:           rn.bytesIn,
 		BytesWritten:        rn.bytesOut,
@@ -65,12 +73,17 @@ func (rn *URingNet) stats() Stats {
 		RecvBufferExhausted: rn.enobufs,
 		BackpressurePauses:  uint64(rn.pauses),
 		ZeroCopySends:       uint64(rn.zcSends),
+		PacketsReceived:     rn.packetsIn,
+		PacketsSent:         rn.packetsOut,
+		PacketsTruncated:    rn.truncated,
+		SendErrors:          rn.sendErrs,
 	}
 }
 
 func (t *Stats) add(s Stats) {
 	t.Connections += s.Connections
 	t.Accepted += s.Accepted
+	t.Dialed += s.Dialed
 	t.AcceptErrors += s.AcceptErrors
 	t.BytesRead += s.BytesRead
 	t.BytesWritten += s.BytesWritten
@@ -79,4 +92,8 @@ func (t *Stats) add(s Stats) {
 	t.RecvBufferExhausted += s.RecvBufferExhausted
 	t.BackpressurePauses += s.BackpressurePauses
 	t.ZeroCopySends += s.ZeroCopySends
+	t.PacketsReceived += s.PacketsReceived
+	t.PacketsSent += s.PacketsSent
+	t.PacketsTruncated += s.PacketsTruncated
+	t.SendErrors += s.SendErrors
 }
