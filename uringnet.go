@@ -40,8 +40,18 @@ type URingNet struct {
 	BufferSize int
 
 	// SpinTime 为事件循环阻塞前的忙轮询时长（0 表示不轮询）。
-	// 以 CPU 换取更低的延迟，在唤醒代价高的环境（虚拟机）和中低并发下收益明显，建议 10µs~50µs。
+	// 以 CPU 换取更低的延迟，在唤醒代价高的环境（虚拟机）和中低并发下收益明显，建议 50µs。
+	// 默认自适应：满载（每轮积压大量完成事件）时自动停止轮询，以免降低吞吐。
 	SpinTime time.Duration
+
+	// SpinFixed 为 true 时不论负载总是轮询（关闭自适应）
+	SpinFixed bool
+
+	// 自适应轮询的阈值：每轮事件循环平均处理的完成事件数达到 SpinBusyBatch 时停止轮询，
+	// 低于 SpinIdleBatch 时恢复。0 表示使用默认值（128 / 64）。调大则在更高负载下继续轮询
+	// （更看重延迟），调小则更早停止（更看重吞吐和 CPU）。
+	SpinBusyBatch int
+	SpinIdleBatch int
 
 	// ZeroCopyThreshold 大于 0 时开启零拷贝发送（IORING_OP_SEND_ZC，Linux 6.0+）：
 	// 不小于该字节数的原地发送（WriteBuf 指向接收缓冲区）和 WriteNoCopy 数据使用 SEND_ZC，
@@ -276,7 +286,10 @@ func (rn *URingNet) start(bufferCount int) error {
 		Entries: rn.entries,
 		BufferRings: []iouring.BufferRingConfig{{Count: bufferCount, Size: rn.BufferSize, Fixed: rn.ZeroCopyThreshold > 0,
 			Incremental: rn.IncrementalBuffers}},
-		SpinTime: rn.SpinTime,
+		SpinTime:      rn.SpinTime,
+		SpinFixed:     rn.SpinFixed,
+		SpinBusyBatch: rn.SpinBusyBatch,
+		SpinIdleBatch: rn.SpinIdleBatch,
 	}
 	l, err := iouring.NewLoop(cfg)
 	if err != nil && cfg.BufferRings[0].Incremental {

@@ -101,7 +101,9 @@ func main() {
 |---|---|
 | `NewMany(addr, size, sqpoll, num, options, handler)` | create `num` rings; with `ReusePort` each ring gets its own listening socket. `sqpoll` is deprecated and ignored. Only stream protocols (tcp/tcp4/tcp6/unix) are supported. |
 | `URingNet.BufferSize` | size of one receive buffer, set before `SetLoops` (default 16KB) |
-| `URingNet.SpinTime` | busy-poll before blocking (e.g. `50*time.Microsecond`): lower latency at the cost of CPU |
+| `URingNet.SpinTime` | busy-poll before blocking (e.g. `50*time.Microsecond`): lower latency at the cost of CPU. Adaptive by default: it stops when the loop is busy |
+| `URingNet.SpinBusyBatch` / `SpinIdleBatch` | adaptive polling thresholds: stop polling at this average batch size per loop iteration, resume below the other (defaults 128 / 64) |
+| `URingNet.SpinFixed` | always poll, even under full load |
 | `URingNet.ZeroCopyThreshold` | enable zero-copy send (`IORING_OP_SEND_ZC`) for writes of at least this many bytes; 0 disables |
 | `URingNet.RecvBundle` | recv bundles: one completion can carry several receive buffers. `BundleAuto` (default) enables them on Linux 6.16+ only; see below |
 | `URingNet.IncrementalBuffers` | **experimental**: incremental buffer ring (Linux 6.12+), best with `BufferSize` 64KB and 32+ buffers; see below |
@@ -257,6 +259,32 @@ Same setup; uringnet with `IncrementalBuffers`, 32 x 64KB buffers per ring:
 | 512, 8, 16KB | 172k | **1.75** | 1.52 | 1.57 |
 
 Median latency at 512 connections, `p = 8`, 16KB: epoll 23.3ms, gnet 12.3ms, uringnet with bundles 22.4ms, incremental 10.9ms.
+
+### Adaptive busy polling
+
+`SpinTime` polling is adaptive: every 10ms the event loop computes how many completions it handles per iteration on average.
+It stops polling when that reaches `SpinBusyBatch` (default 128) and resumes below `SpinIdleBatch` (default 64). At low load
+an iteration handles a few completions, so polling saves the sleep/wake-up. Under full load hundreds pile up per iteration;
+blocking lets data accumulate into larger batches, while polling splits them up. (The *Request/response* table above was
+measured with always-on polling, before polling became adaptive.)
+
+Same setup, incremental buffers (32 x 64KB), `SpinTime = 50µs`:
+
+| Connections, `p`, size | epoll | gnet | no polling | always polling | adaptive polling |
+|---|---|---|---|---|---|
+| 1, 1, 128B | 10k | 1.05 | 0.98 | **1.67** | 1.60 |
+| 16, 1, 128B | 103k | 1.09 | 0.90 | 1.45 | **1.52** |
+| 16, 1, 16KB | 81k | 0.94 | 0.72 | **1.12** | 1.06 |
+| 16, 8, 16KB | 144k | **1.59** | 1.22 | 1.41 | **1.58** |
+| 64, 1, 128B | 201k | 1.24 | 1.00 | **1.26** | 1.21 |
+| 64, 1, 16KB | 152k | **1.06** | 0.69 | 0.90 | 0.90 |
+| 64, 8, 16KB | 190k | **1.77** | 1.61 | 1.61 | 1.58 |
+| 512, 1, 128B | 319k | 0.89 | 1.13 | 1.13 | **1.19** |
+| 512, 1, 16KB | 199k | 0.97 | **1.00** | 0.81 | 0.93 |
+| 512, 8, 16KB | 136k | **2.13** | 1.84 | 1.87 | 1.78 |
+
+Adaptive polling keeps the low-load gains (median latency 78µs → 30µs at one connection) and recovers most of what always-on
+polling loses under full load (512 connections, 16KB: 0.81x → 0.93x of epoll; 1.00x without polling).
 
 ### Reading the results
 

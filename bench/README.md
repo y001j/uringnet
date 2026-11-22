@@ -14,7 +14,8 @@
 | `uringnet-zc` | 本项目，`ZeroCopyThreshold = 16KB` |
 | `uringnet-inc` | 本项目，增量消费 buffer ring（实验性，Linux 6.12+），32 × 64KB |
 
-`servers/uringnet` 支持参数：`-bufs`（接收缓冲区数量）、`-bufsize`、`-spin`（如 `50us`）、`-zc`（零拷贝阈值）、
+`servers/uringnet` 支持参数：`-bufs`（接收缓冲区数量）、`-bufsize`、`-spin`（如 `50us`，默认自适应）、
+`-spinfixed`（总是轮询）、`-spinbusy` / `-spinidle`（自适应阈值）、`-zc`（零拷贝阈值）、
 `-bundle auto|on|off`（recv bundle；`on` 在 6.16 之前的内核上可能导致数据错乱，只用于评估性能）、
 `-inc`（增量消费 buffer ring，Linux 6.12+，建议配合 `-bufs 32 -bufsize 65536`）。
 
