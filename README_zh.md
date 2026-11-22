@@ -113,7 +113,7 @@ func main() {
 | `Server.Shutdown(ctx)` | 优雅关闭：停止接受新连接，每个连接把已写入的数据发完后关闭；`ctx` 结束时仍未关闭的连接立即关闭 |
 | `Server.Close()` | 立即关闭所有连接和事件循环 |
 | `Server.Addr()` / `Connections()` | 监听地址（`:0` 时为实际端口）/ 当前连接数 |
-| `Server.Stats()` | 运行指标：接受的连接数、收发字节数、超时、accept 失败、接收缓冲区耗尽、背压暂停、零拷贝发送次数。可以用 `expvar.Func` 或任意指标库发布 |
+| `Server.Stats()` | 运行指标：接受的连接数、收发字节数、超时、accept 失败、接收缓冲区耗尽、背压暂停、零拷贝发送、慢回调、TLS 等计数。可以用 `expvar.Func` 或任意指标库发布 |
 
 **选项**
 
@@ -131,6 +131,10 @@ func main() {
 | `WithIdleTimeout(d)` | 连接在 `d` 内既没收到也没发出数据就关闭 |
 | `WithWriteTimeout(d)` | 发送队列在 `d` 内没有任何进展（例如对端不再读取）就关闭连接 |
 | `WithReusePort(on)` / `WithTCPNoDelay(on)` | 每个 ring 一个开启 `SO_REUSEPORT` 的监听套接字（默认开启）/ `TCP_NODELAY`（默认开启） |
+| `WithLoadBalancing(lb)` | 新连接在各 ring 之间的分配方式：`BalanceKernel`（默认，由 `SO_REUSEPORT` 哈希）、`BalanceRoundRobin`（轮询）、`BalanceLeastConnections`（最少连接）、`BalanceSourceAddrHash`（按客户端 IP 哈希）。后三种由 ring 0 统一 accept 再分发，长连接能分配得更均匀 |
+| `WithTCPKeepAlive(d)` / `WithSocketBuffers(recv, send)` | TCP keepalive（空闲时间和探测间隔为 `d`）/ `SO_RCVBUF`、`SO_SNDBUF`，作用于接入、拨出和 UDP 的 socket |
+| `WithSlowCallbackWarning(d)` | 回调耗时达到 `d`、或运行超过 `d` 仍未返回时输出警告（并计入 `Stats.SlowCallbacks`）：回调阻塞会卡住同一 ring 上的所有连接 |
+| `WithMulticastInterface(name)` | 加入和发送 UDP 组播使用的网卡 |
 | `WithTLS(cfg)` / `WithDialTLS(cfg)` | 接入 / 拨出的连接使用 TLS，见下文 *TLS* |
 | `WithKTLS(on)` | TLS 1.3 握手后使用内核 TLS（默认开启；需要 `tls` 模块） |
 | `WithBackend(b)` | `BackendAuto`（默认）：使用 io_uring，不可用时回退到 epoll；`BackendIOUring` 或 `BackendEpoll` 强制使用其中一种。`Server.Backend()` 返回实际使用的后端 |
@@ -148,6 +152,7 @@ func main() {
 | `Conn.WriteNoCopy(b, release)` | 不拷贝地加入发送队列；内核不再使用 `b` 后调用 `release` |
 | `Conn.Close()` | 已写入的数据发完后关闭连接 |
 | `Conn.AsyncWrite(b, done)` / `AsyncClose()` | 同上，可在任意 goroutine 中调用 |
+| `Conn.Peek(n)` / `Next(n)` / `Discard(n)` / `InboundBuffered()` | 增量读取数据流：`OnTraffic` 返回时没读完的数据会保留到下次（只针对用了这些方法的连接，其他连接不保留任何数据）。仍在接收缓冲区里的数据直接返回，不拷贝 |
 | `Conn.Context()` / `SetContext(v)` | 连接级的状态 |
 | `Conn.RemoteAddr()` / `LocalAddr()` / `Fd()` / `Buffered()` | 地址、套接字 fd、排队待发的字节数 |
 
@@ -214,6 +219,8 @@ srv, err := uringnet.Listen("tcp", ":9000", uringnet.Framed(framer, handler)) //
 接收到 provided buffer ring。`OnPacket(pc, data, from)` 收到的来源地址是 `netip.AddrPort`，接收过程不分配内存；用
 `pc.WriteTo` 回复，或在任意 goroutine 中用 `AsyncWriteTo` 发送。接收缓冲区要能放下整个数据报再加约 48 字节，更大的数据报
 会被丢弃并计入 `Stats.PacketsTruncated`。绑定端口 0 并用 `Start` 启动时，`PacketServer` 也可以当作 UDP 客户端使用。
+地址是组播地址时（如 `ListenPacket("udp4", "239.1.2.3:5000", h)`）会自动加入该组播组，网卡由 `WithMulticastInterface` 指定，默认由系统选择；
+此时所有 ring 共用一个 socket，每个数据报只投递一次。
 
 ### 接收缓冲区的数量
 

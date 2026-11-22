@@ -128,32 +128,43 @@ type URingNet struct {
 	ringloop *Ringloop
 
 	// The fields below are only accessed on the loop thread.
-	conns       map[int]*conn
-	held        int     // receive buffers held by send queues
-	maxHeld     int     // maximum buffers held by in-place sends (half of them)
-	starved     []*conn // connections whose receiving stopped with -ENOBUFS
-	stopping    bool
-	draining    bool        // graceful shutdown: no new connections, existing ones close after flushing
-	noDelay     bool        // set TCP_NODELAY on dialed connections
-	tlsServer   *tls.Config // TLS for accepted connections (WithTLS)
-	tlsClient   *tls.Config // TLS for dialed connections (WithDialTLS)
-	tlsErrors   uint64      // failed TLS handshakes
-	ktls        bool        // try kernel TLS after TLS 1.3 handshakes (WithKTLS)
-	ktlsConns   uint64      // connections that use kernel TLS
-	tlsBuf      []byte      // plaintext buffer shared by the ring's TLS connections
-	fixedIdx    int         // fixed-buffer index of the receive buffers, -1 if not registered
-	zcOff       bool        // zero-copy send turned off (unsupported, or epoll)
-	zcSends     int         // SEND_ZC sends (stats, tests)
-	bundle      bool        // recv bundles in use
-	bundleBufs  []iouring.BundleBuf
-	inc         bool    // incremental buffer ring in use
-	incRefs     []int32 // incremental: slices of each buffer referenced by in-place sends
-	incDone     []bool  // incremental: the kernel has finished filling the buffer
-	incPinned   int     // incremental: buffers with at least one referenced slice
-	gatherSends int     // sendmsg gather sends (tests)
-	maxWrite    int     // effective MaxWriteBuffer, <= 0 for no limit
-	pauses      int     // receive pauses caused by backpressure
-	nopH        iouring.Handler
+	conns     map[int]*conn
+	held      int     // receive buffers held by send queues
+	maxHeld   int     // maximum buffers held by in-place sends (half of them)
+	starved   []*conn // connections whose receiving stopped with -ENOBUFS
+	stopping  bool
+	draining  bool          // graceful shutdown: no new connections, existing ones close after flushing
+	noDelay   bool          // set TCP_NODELAY on dialed connections
+	keepAlive time.Duration // TCP keepalive for dialed connections (accepted ones inherit it)
+	recvBuf   int           // SO_RCVBUF for dialed connections, 0 for the default
+	sendBuf   int           // SO_SNDBUF for dialed connections, 0 for the default
+
+	balancer *balancer    // WithLoadBalancing other than BalanceKernel: picks the ring for accepted connections
+	noAccept bool         // another ring accepts for this one (load balancing)
+	incoming atomic.Int64 // connections handed to this ring and not opened yet
+
+	slowCallback  time.Duration // WithSlowCallbackWarning threshold, 0 when off
+	cbStart       atomic.Int64  // monoNow at the start of the running callback, 0 if none (read by watchCallbacks)
+	slowCallbacks uint64        // callbacks that took longer than slowCallback
+	tlsServer     *tls.Config   // TLS for accepted connections (WithTLS)
+	tlsClient     *tls.Config   // TLS for dialed connections (WithDialTLS)
+	tlsErrors     uint64        // failed TLS handshakes
+	ktls          bool          // try kernel TLS after TLS 1.3 handshakes (WithKTLS)
+	ktlsConns     uint64        // connections that use kernel TLS
+	tlsBuf        []byte        // plaintext buffer shared by the ring's TLS connections
+	fixedIdx      int           // fixed-buffer index of the receive buffers, -1 if not registered
+	zcOff         bool          // zero-copy send turned off (unsupported, or epoll)
+	zcSends       int           // SEND_ZC sends (stats, tests)
+	bundle        bool          // recv bundles in use
+	bundleBufs    []iouring.BundleBuf
+	inc           bool    // incremental buffer ring in use
+	incRefs       []int32 // incremental: slices of each buffer referenced by in-place sends
+	incDone       []bool  // incremental: the kernel has finished filling the buffer
+	incPinned     int     // incremental: buffers with at least one referenced slice
+	gatherSends   int     // sendmsg gather sends (tests)
+	maxWrite      int     // effective MaxWriteBuffer, <= 0 for no limit
+	pauses        int     // receive pauses caused by backpressure
+	nopH          iouring.Handler
 
 	// Timeouts: a tick every tickEvery; connections record the tick of their last activity (a coarse clock, no time reads).
 	tick                  uint64
@@ -522,7 +533,7 @@ const (
 )
 
 func (rn *URingNet) armAccept() {
-	if rn.stopping || rn.draining || rn.SocketFd < 0 {
+	if rn.stopping || rn.draining || rn.SocketFd < 0 || rn.noAccept {
 		return
 	}
 	if rn.packet {
@@ -540,7 +551,7 @@ func (rn *URingNet) onAccept(res int32, flags uint32) {
 		if rn.stopping || rn.draining {
 			unix.Close(int(res))
 		} else {
-			rn.openConn(int(res), nil, rn.tlsServer, false, nil)
+			rn.acceptedConn(int(res))
 		}
 	}
 	if flags&iouring_syscall.IORING_CQE_F_MORE != 0 || rn.stopping || rn.draining {
@@ -591,7 +602,9 @@ func (rn *URingNet) openConn(fd int, ctx interface{}, tlsCfg *tls.Config, client
 func (c *conn) callOpen() {
 	c.opened = true
 	c.batching = true
+	t0 := c.rn.cbBegin()
 	c.rn.h.open(c)
+	c.rn.cbEnd(t0, "OnOpen", c.fd)
 	c.batching = false
 	c.flush()
 	c.checkBackpressure()

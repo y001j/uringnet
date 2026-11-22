@@ -74,7 +74,10 @@ func ListenPacket(network, address string, h PacketHandler, opts ...Option) (*Pa
 	if o.rings <= 0 {
 		return nil, fmt.Errorf("uringnet: invalid number of rings %d", o.rings)
 	}
-	reuse := o.reusePort && o.rings > 1
+	// A multicast group is joined on one socket shared by the rings: with SO_REUSEPORT every socket
+	// would receive its own copy of each datagram
+	group := multicastGroup(network, address)
+	reuse := o.reusePort && o.rings > 1 && group == nil
 	s := &PacketServer{}
 	log := o.logger
 	if log == nil {
@@ -86,7 +89,7 @@ func ListenPacket(network, address string, h PacketHandler, opts ...Option) (*Pa
 		fd := sharedFd
 		if reuse || i == 0 {
 			var err error
-			if fd, err = listenUDP(network, address, reuse); err != nil {
+			if fd, err = listenUDP(network, address, reuse, o); err != nil {
 				s.closeSockets()
 				if sharedFd >= 0 {
 					unix.Close(sharedFd)
@@ -271,7 +274,9 @@ func (rn *URingNet) deliverPacket(buf []byte) {
 	from := parseSockaddr(buf[recvmsgOutLen : recvmsgOutLen+int(min(nameLen, packetNameLen))])
 	rn.packetsIn++
 	rn.bytesIn += uint64(payloadLen)
+	t0 := rn.cbBegin()
 	rn.ph.OnPacket(&rn.pc, payload, from)
+	rn.cbEnd(t0, "OnPacket", rn.SocketFd)
 }
 
 // parseSockaddr converts the sockaddr_in / sockaddr_in6 written by the kernel to a netip.AddrPort without allocating.
@@ -355,7 +360,7 @@ func (rn *URingNet) sendTo(b []byte, to netip.AddrPort, done func(error)) error 
 }
 
 // listenUDP creates and binds a UDP socket in blocking mode (io_uring does the waiting).
-func listenUDP(network, address string, reusePort bool) (int, error) {
+func listenUDP(network, address string, reusePort bool, o options) (int, error) {
 	ua, err := net.ResolveUDPAddr(network, address)
 	if err != nil {
 		return -1, err
@@ -397,11 +402,67 @@ func listenUDP(network, address string, reusePort bool) (int, error) {
 		}
 		sa = s6
 	}
+	setSocketBuffers(fd, o.recvBuf, o.sendBuf)
 	if err := unix.Bind(fd, sa); err != nil {
 		unix.Close(fd)
 		return -1, fmt.Errorf("uringnet: bind %s: %w", address, err)
 	}
+	if err := setMulticast(fd, ua.IP, o.mcastIface); err != nil {
+		unix.Close(fd)
+		return -1, err
+	}
 	return fd, nil
+}
+
+// multicastGroup returns the group address if address is a multicast one, otherwise nil.
+func multicastGroup(network, address string) net.IP {
+	ua, err := net.ResolveUDPAddr(network, address)
+	if err != nil || ua.IP == nil || !ua.IP.IsMulticast() {
+		return nil
+	}
+	return ua.IP
+}
+
+// setMulticast joins group (if it is a multicast address) on interface iface ("" for the system
+// default), and makes iface the interface for outgoing multicast when one is named.
+func setMulticast(fd int, group net.IP, iface string) error {
+	index := 0
+	if iface != "" {
+		ifi, err := net.InterfaceByName(iface)
+		if err != nil {
+			return fmt.Errorf("uringnet: multicast interface: %w", err)
+		}
+		index = ifi.Index
+	}
+	isGroup := group != nil && group.IsMulticast()
+	if ip4 := group.To4(); ip4 != nil || (group == nil && iface != "") {
+		if isGroup {
+			mreq := &unix.IPMreqn{Ifindex: int32(index)}
+			copy(mreq.Multiaddr[:], ip4)
+			if err := unix.SetsockoptIPMreqn(fd, unix.IPPROTO_IP, unix.IP_ADD_MEMBERSHIP, mreq); err != nil {
+				return fmt.Errorf("uringnet: join multicast group %v: %w", group, err)
+			}
+		}
+		if index != 0 {
+			if err := unix.SetsockoptIPMreqn(fd, unix.IPPROTO_IP, unix.IP_MULTICAST_IF, &unix.IPMreqn{Ifindex: int32(index)}); err != nil {
+				return fmt.Errorf("uringnet: multicast interface: %w", err)
+			}
+		}
+		return nil
+	}
+	if isGroup {
+		mreq := &unix.IPv6Mreq{Interface: uint32(index)}
+		copy(mreq.Multiaddr[:], group.To16())
+		if err := unix.SetsockoptIPv6Mreq(fd, unix.IPPROTO_IPV6, unix.IPV6_JOIN_GROUP, mreq); err != nil {
+			return fmt.Errorf("uringnet: join multicast group %v: %w", group, err)
+		}
+	}
+	if index != 0 {
+		if err := unix.SetsockoptInt(fd, unix.IPPROTO_IPV6, unix.IPV6_MULTICAST_IF, index); err != nil {
+			return fmt.Errorf("uringnet: multicast interface: %w", err)
+		}
+	}
+	return nil
 }
 
 func ipv6Only(ua *net.UDPAddr) bool { return ua.IP != nil && ua.IP.To4() == nil }

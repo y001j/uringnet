@@ -230,7 +230,9 @@ func (c *conn) traffic(bid uint16, data []byte) (held bool) {
 		return false
 	}
 	c.curBuf, c.curBid, c.curHeld = data, int32(bid), false
+	t0 := c.rn.cbBegin()
 	c.rn.h.traffic(c, data)
+	c.rn.cbEnd(t0, "OnTraffic", c.fd)
 	held = c.curHeld
 	c.curBuf, c.curBid, c.curHeld = nil, -1, false
 	return held
@@ -566,7 +568,9 @@ func (c *conn) free() {
 		c.tls.tr.end(net.ErrClosed) // stops the TLS goroutine
 	}
 	if c.opened {
+		t0 := c.rn.cbBegin()
 		c.rn.h.closed(c)
+		c.rn.cbEnd(t0, "OnClose", c.fd)
 	}
 	if !c.sending {
 		for len(c.q) > 0 {

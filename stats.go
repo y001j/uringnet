@@ -27,6 +27,9 @@ type Stats struct {
 	// ZeroCopySends counts sends made with SEND_ZC (WithZeroCopy).
 	ZeroCopySends uint64
 
+	// SlowCallbacks counts callbacks that ran longer than the WithSlowCallbackWarning threshold.
+	SlowCallbacks uint64
+
 	// TLSHandshakeErrors counts connections closed because their TLS handshake failed.
 	TLSHandshakeErrors uint64
 	// KernelTLSConnections counts TLS connections whose records the kernel encrypts and decrypts.
@@ -79,6 +82,7 @@ func (rn *URingNet) stats() Stats {
 		BackpressurePauses:   uint64(rn.pauses),
 		ZeroCopySends:        uint64(rn.zcSends),
 		TLSHandshakeErrors:   rn.tlsErrors,
+		SlowCallbacks:        rn.slowCallbacks,
 		KernelTLSConnections: rn.ktlsConns,
 		PacketsReceived:      rn.packetsIn,
 		PacketsSent:          rn.packetsOut,
@@ -100,6 +104,7 @@ func (t *Stats) add(s Stats) {
 	t.BackpressurePauses += s.BackpressurePauses
 	t.ZeroCopySends += s.ZeroCopySends
 	t.TLSHandshakeErrors += s.TLSHandshakeErrors
+	t.SlowCallbacks += s.SlowCallbacks
 	t.KernelTLSConnections += s.KernelTLSConnections
 	t.PacketsReceived += s.PacketsReceived
 	t.PacketsSent += s.PacketsSent

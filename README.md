@@ -124,7 +124,7 @@ func main() {
 | `Server.Shutdown(ctx)` | graceful: stop accepting, let each connection send the data already written, then close it; connections still open when `ctx` ends are closed at once |
 | `Server.Close()` | close everything at once |
 | `Server.Addr()` / `Connections()` | listening address (with the real port for `:0`) / open connections |
-| `Server.Stats()` | counters: accepted connections, bytes in/out, timeouts, accept errors, receive-buffer exhaustion, backpressure pauses, zero-copy sends. Publish them with `expvar.Func` or any metrics library |
+| `Server.Stats()` | counters: accepted connections, bytes in/out, timeouts, accept errors, receive-buffer exhaustion, backpressure pauses, zero-copy sends, slow callbacks, TLS. Publish them with `expvar.Func` or any metrics library |
 
 **Options**
 
@@ -142,6 +142,10 @@ func main() {
 | `WithIdleTimeout(d)` | close connections that neither receive nor send data for `d` |
 | `WithWriteTimeout(d)` | close connections whose send queue makes no progress for `d`, e.g. a peer that stopped reading |
 | `WithReusePort(on)` / `WithTCPNoDelay(on)` | one listening socket per ring with `SO_REUSEPORT` (default on) / `TCP_NODELAY` (default on) |
+| `WithLoadBalancing(lb)` | how new connections are spread over rings: `BalanceKernel` (default, `SO_REUSEPORT` hashing), `BalanceRoundRobin`, `BalanceLeastConnections`, `BalanceSourceAddrHash` (by client IP). The last three accept on ring 0 and hand connections over, which balances long-lived connections evenly |
+| `WithTCPKeepAlive(d)` / `WithSocketBuffers(recv, send)` | TCP keepalive (idle time and probe interval `d`) / `SO_RCVBUF`, `SO_SNDBUF`, for accepted, dialed and UDP sockets |
+| `WithSlowCallbackWarning(d)` | warn (and count `Stats.SlowCallbacks`) when a callback takes `d` or longer, or is still running after `d`: a blocked callback stalls every connection of its ring |
+| `WithMulticastInterface(name)` | interface for joining and sending UDP multicast |
 | `WithTLS(cfg)` / `WithDialTLS(cfg)` | TLS for accepted / dialed connections; see *TLS* below |
 | `WithKTLS(on)` | kernel TLS after TLS 1.3 handshakes (default on; needs the `tls` module) |
 | `WithBackend(b)` | `BackendAuto` (default): io_uring, falling back to epoll when io_uring is unavailable; `BackendIOUring` or `BackendEpoll` to force one. `Server.Backend()` reports which one runs |
@@ -159,6 +163,7 @@ func main() {
 | `Conn.WriteNoCopy(b, release)` | queue `b` without copying; `release` is called once the kernel no longer uses it |
 | `Conn.Close()` | close after the data already written is sent |
 | `Conn.AsyncWrite(b, done)` / `AsyncClose()` | the same from any goroutine |
+| `Conn.Peek(n)` / `Next(n)` / `Discard(n)` / `InboundBuffered()` | read the stream incrementally: bytes not consumed when `OnTraffic` returns are kept for the next call (only for connections that use these; the others keep nothing). Bytes still in the receive buffer are returned without a copy |
 | `Conn.Context()` / `SetContext(v)` | per-connection state |
 | `Conn.RemoteAddr()` / `LocalAddr()` / `Fd()` / `Buffered()` | addresses, socket fd, bytes queued |
 
@@ -233,6 +238,8 @@ multishot `recvmsg` into the provided buffer ring. `OnPacket(pc, data, from)` ge
 so receiving allocates nothing; reply with `pc.WriteTo`, or send from any goroutine with `AsyncWriteTo`. A receive
 buffer must hold a whole datagram plus about 48 bytes; larger datagrams are dropped and counted in
 `Stats.PacketsTruncated`. Bound to port 0 and started with `Start`, a `PacketServer` also works as a UDP client.
+With a multicast address (`ListenPacket("udp4", "239.1.2.3:5000", h)`) the group is joined, on the interface given by
+`WithMulticastInterface` or the system default, and the rings share one socket so each datagram is delivered once.
 
 ### Sizing receive buffers
 

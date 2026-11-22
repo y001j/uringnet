@@ -48,22 +48,22 @@ type framed struct {
 
 func (fh framed) OnBoot(s *Server)           { fh.h.OnBoot(s) }
 func (fh framed) OnOpen(c *Conn) Action      { return fh.h.OnOpen(c) }
-func (fh framed) OnClose(c *Conn, err error) { fh.h.OnClose(c, err); c.pending = nil }
+func (fh framed) OnClose(c *Conn, err error) { fh.h.OnClose(c, err); c.framePending = nil }
 func (fh framed) OnShutdown(s *Server)       { fh.h.OnShutdown(s) }
 
 func (fh framed) OnTraffic(c *Conn, data []byte) Action {
 	buf := data
-	buffered := len(c.pending) > 0
+	buffered := len(c.framePending) > 0
 	if buffered {
-		c.pending = append(c.pending, data...)
-		buf = c.pending
+		c.framePending = append(c.framePending, data...)
+		buf = c.framePending
 	}
 	action := None
 	for len(buf) > 0 && action == None && !c.c.closed && !c.c.closeAfter {
 		n, err := fh.f.Frame(buf)
 		if err != nil {
 			c.c.fail(err)
-			c.pending = nil
+			c.framePending = nil
 			return None
 		}
 		if n <= 0 {
@@ -71,16 +71,16 @@ func (fh framed) OnTraffic(c *Conn, data []byte) Action {
 		}
 		if n > len(buf) {
 			c.c.fail(fmt.Errorf("uringnet: Framer returned %d for %d buffered bytes", n, len(buf)))
-			c.pending = nil
+			c.framePending = nil
 			return None
 		}
 		action = fh.h.OnMessage(c, buf[:n])
 		buf = buf[n:]
 	}
 	// Keep the incomplete frame: moved forward when buf is a suffix of pending, copied out when it lies in the receive buffer
-	c.pending = append(c.pending[:0], buf...)
-	if len(c.pending) == 0 && cap(c.pending) > 64<<10 {
-		c.pending = nil // do not hold on to the memory of an occasional large frame
+	c.framePending = append(c.framePending[:0], buf...)
+	if len(c.framePending) == 0 && cap(c.framePending) > 64<<10 {
+		c.framePending = nil // do not hold on to the memory of an occasional large frame
 	}
 	return action
 }
