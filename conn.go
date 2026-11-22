@@ -142,6 +142,9 @@ func (cn *Conn) TLSConnectionState() (state tls.ConnectionState, ok bool) {
 	return cn.c.tls.tc.ConnectionState(), true
 }
 
+// KernelTLS reports whether the kernel encrypts and decrypts this TLS connection (see WithKTLS).
+func (cn *Conn) KernelTLS() bool { return cn.c.tls != nil && cn.c.tls.rxKernel }
+
 // Context returns the value set with SetContext.
 func (cn *Conn) Context() interface{} { return cn.ctx }
 

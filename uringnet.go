@@ -138,6 +138,8 @@ type URingNet struct {
 	tlsServer   *tls.Config // TLS for accepted connections (WithTLS)
 	tlsClient   *tls.Config // TLS for dialed connections (WithDialTLS)
 	tlsErrors   uint64      // failed TLS handshakes
+	ktls        bool        // try kernel TLS after TLS 1.3 handshakes (WithKTLS)
+	ktlsConns   uint64      // connections that use kernel TLS
 	tlsBuf      []byte      // plaintext buffer shared by the ring's TLS connections
 	fixedIdx    int         // fixed-buffer index of the receive buffers, -1 if not registered
 	zcOff       bool        // zero-copy send turned off (unsupported, or epoll)
@@ -569,8 +571,7 @@ func (rn *URingNet) openConn(fd int, ctx interface{}, tlsCfg *tls.Config, client
 	rn.connCount.Add(1)
 
 	if tlsCfg != nil {
-		c.startTLS(tlsCfg, client, onReady)
-		c.armRecv() // the handshake needs the peer's data
+		c.startTLS(tlsCfg, client, onReady) // the handshake goroutine reads the socket; recv is armed afterwards
 		return c
 	}
 	c.callOpen()

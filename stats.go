@@ -29,6 +29,8 @@ type Stats struct {
 
 	// TLSHandshakeErrors counts connections closed because their TLS handshake failed.
 	TLSHandshakeErrors uint64
+	// KernelTLSConnections counts TLS connections whose records the kernel encrypts and decrypts.
+	KernelTLSConnections uint64
 
 	// UDP (PacketServer)
 	PacketsReceived  uint64 // datagrams delivered to OnPacket
@@ -65,22 +67,23 @@ func (s *Server) Stats() Stats {
 // stats reads this ring's counters; loop thread only.
 func (rn *URingNet) stats() Stats {
 	return Stats{
-		Connections:         int64(len(rn.conns)),
-		Accepted:            rn.accepted,
-		Dialed:              rn.dialed,
-		AcceptErrors:        rn.acceptErrs,
-		BytesRead:           rn.bytesIn,
-		BytesWritten:        rn.bytesOut,
-		IdleTimeouts:        rn.idleCloses,
-		WriteTimeouts:       rn.writeCloses,
-		RecvBufferExhausted: rn.enobufs,
-		BackpressurePauses:  uint64(rn.pauses),
-		ZeroCopySends:       uint64(rn.zcSends),
-		TLSHandshakeErrors:  rn.tlsErrors,
-		PacketsReceived:     rn.packetsIn,
-		PacketsSent:         rn.packetsOut,
-		PacketsTruncated:    rn.truncated,
-		SendErrors:          rn.sendErrs,
+		Connections:          int64(len(rn.conns)),
+		Accepted:             rn.accepted,
+		Dialed:               rn.dialed,
+		AcceptErrors:         rn.acceptErrs,
+		BytesRead:            rn.bytesIn,
+		BytesWritten:         rn.bytesOut,
+		IdleTimeouts:         rn.idleCloses,
+		WriteTimeouts:        rn.writeCloses,
+		RecvBufferExhausted:  rn.enobufs,
+		BackpressurePauses:   uint64(rn.pauses),
+		ZeroCopySends:        uint64(rn.zcSends),
+		TLSHandshakeErrors:   rn.tlsErrors,
+		KernelTLSConnections: rn.ktlsConns,
+		PacketsReceived:      rn.packetsIn,
+		PacketsSent:          rn.packetsOut,
+		PacketsTruncated:     rn.truncated,
+		SendErrors:           rn.sendErrs,
 	}
 }
 
@@ -97,6 +100,7 @@ func (t *Stats) add(s Stats) {
 	t.BackpressurePauses += s.BackpressurePauses
 	t.ZeroCopySends += s.ZeroCopySends
 	t.TLSHandshakeErrors += s.TLSHandshakeErrors
+	t.KernelTLSConnections += s.KernelTLSConnections
 	t.PacketsReceived += s.PacketsReceived
 	t.PacketsSent += s.PacketsSent
 	t.PacketsTruncated += s.PacketsTruncated

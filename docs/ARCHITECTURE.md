@@ -140,20 +140,30 @@ data already written is still sent before closing. `OnClose` receives the first 
 
 ## TLS
 
-`crypto/tls` needs a blocking `net.Conn` and cannot pause a handshake halfway, so a TLS connection
-(`WithTLS`, `WithDialTLS`) sits on an in-memory transport (`tls.go`):
+A TLS connection (`WithTLS`, `WithDialTLS`) is handled in `tls.go` in two phases.
 
-1. **Handshake** on a goroutine of its own: the loop feeds received ciphertext into the transport, the
-   goroutine's blocking `Read` takes it, and handshake messages it writes are posted back to the loop to send.
-   `OnOpen` runs only after the handshake succeeded; a `Dial` returns only then.
-2. **Steady state** on the loop thread: the goroutine exits and the transport turns non-blocking. When a record
-   is incomplete it returns a temporary `net.Error`, which `crypto/tls` does not treat as fatal after the
-   handshake: it keeps the partial record and continues on the next `Read`. So received data is decrypted and
-   passed to `OnTraffic` without a goroutine switch, the receive buffer is only lent to `crypto/tls` (which
-   copies into its record buffer), and `Write` encrypts straight into the send queue, reusing send buffers.
+1. **Handshake** with `crypto/tls` on a goroutine of its own, over a transport that reads and writes the socket
+   directly (through a `dup` of the fd, so the loop can close the original at any time). Reads never go past the
+   end of the current TLS record: everything the peer sends after the handshake stays in the socket. The event
+   loop does not touch the socket meanwhile. `OnOpen` runs only after the handshake succeeded; a `Dial` returns
+   only then.
+2. **Records**, after the handshake:
+   - **Kernel TLS** (TLS 1.3 with AES-GCM or ChaCha20-Poly1305, `tls` module loaded): the connection's
+     `KeyLogWriter` captured the traffic secrets; HKDF-Expand-Label derives key and IV, and `setsockopt(TCP_ULP,
+     "tls")` / `SOL_TLS TLS_RX, TLS_TX` hand them to the kernel with record sequence number 0. That number is
+     known only because servers send no session tickets under kTLS (Go sends them with the application keys in
+     its first flight) and because the handshake reads stopped at the record boundary. `TLS_RX_EXPECT_NO_PAD`
+     lets the kernel decrypt straight into the receive buffer. From then on the connection's data path is that of
+     plain TCP. A non-data record (an alert, a session ticket from a server) makes a receive fail with `EIO`; it
+     is read with `recvmsg` and its `TLS_GET_RECORD_TYPE` control message: `close_notify` ends the connection like
+     EOF, tickets are ignored, `KeyUpdate` (unsupported by the kernel) closes it. `close_notify` is sent with a
+     `TLS_SET_RECORD_TYPE` control message before the socket is shut down.
+   - **User space** otherwise: `crypto/tls` runs on the loop thread. The transport turns non-blocking and returns
+     a temporary `net.Error` when a record is incomplete, which `crypto/tls` does not treat as fatal after the
+     handshake (it keeps the partial record). Received ciphertext is only lent to `crypto/tls`, and `Write`
+     encrypts straight into the send queue, reusing send buffers.
 
-Closing sends `close_notify`; the peer's `close_notify` or EOF ends the connection after the data before it has
-been delivered. Backpressure and timeouts work on the ciphertext as for plain connections.
+Backpressure and timeouts work as for plain connections.
 
 ## The epoll backend
 

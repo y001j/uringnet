@@ -12,7 +12,7 @@
 - 第 12、13、15 项：拨出连接（Dial/DialAsync/NewClient）、UDP（ListenPacket）、分帧（Framed）已完成。
 - 第 17 项：`Server.Stats()`；第 22 项：`example_test.go`、代码注释统一为英文、架构文档 `docs/ARCHITECTURE.md`。
 - 第 16 项（零拷贝接收）不做：需要数据中心级专用网卡。
-- 第 5 项的 epoll 回退、第 14 项 TLS（WithTLS / WithDialTLS）已完成。
+- 第 5 项的 epoll 回退、第 14 项 TLS（WithTLS / WithDialTLS，TLS 1.3 使用内核 TLS）已完成，随 v0.3.0 发布。
 
 优先级：**P0** 上生产前必须完成 · **P1** 发布 v0.1.0 前完成 · **P2** 按需求排期 · **P3** 长期目标
 
