@@ -26,6 +26,12 @@ type Stats struct {
 	BackpressurePauses uint64
 	// ZeroCopySends counts sends made with SEND_ZC (WithZeroCopy).
 	ZeroCopySends uint64
+
+	// UDP (PacketServer)
+	PacketsReceived  uint64 // datagrams delivered to OnPacket
+	PacketsSent      uint64 // datagrams sent
+	PacketsTruncated uint64 // datagrams dropped because they did not fit in a receive buffer
+	SendErrors       uint64 // failed datagram sends
 }
 
 // Stats returns the server's counters. It is safe to call from any goroutine: the counters
@@ -67,6 +73,10 @@ func (rn *URingNet) stats() Stats {
 		RecvBufferExhausted: rn.enobufs,
 		BackpressurePauses:  uint64(rn.pauses),
 		ZeroCopySends:       uint64(rn.zcSends),
+		PacketsReceived:     rn.packetsIn,
+		PacketsSent:         rn.packetsOut,
+		PacketsTruncated:    rn.truncated,
+		SendErrors:          rn.sendErrs,
 	}
 }
 
@@ -82,4 +92,8 @@ func (t *Stats) add(s Stats) {
 	t.RecvBufferExhausted += s.RecvBufferExhausted
 	t.BackpressurePauses += s.BackpressurePauses
 	t.ZeroCopySends += s.ZeroCopySends
+	t.PacketsReceived += s.PacketsReceived
+	t.PacketsSent += s.PacketsSent
+	t.PacketsTruncated += s.PacketsTruncated
+	t.SendErrors += s.SendErrors
 }

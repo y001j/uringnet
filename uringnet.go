@@ -160,6 +160,15 @@ type URingNet struct {
 	idleCloses, writeCloses uint64
 	dialed                  uint64 // 拨出并建立的连接数
 
+	// UDP（ListenPacket）
+	packet                bool // 数据包模式：没有连接，multishot recvmsg 收数据报
+	ph                    PacketHandler
+	pc                    PacketConn
+	recvMsg               unix.Msghdr // multishot recvmsg 的消息头（只用到地址长度）
+	family                int         // socket 的协议族（AF_INET / AF_INET6）
+	packetsIn, packetsOut uint64
+	truncated, sendErrs   uint64
+
 	connCount atomic.Int64
 
 	shutdownOnce sync.Once
@@ -432,6 +441,14 @@ func (rn *URingNet) start(bufferCount int) error {
 		rn.maxWrite = DefaultMaxWriteBuffer
 	}
 	rn.nopH = func(int32, uint32) {}
+	if rn.packet {
+		rn.family = unix.AF_INET6
+		if sa, err := unix.Getsockname(rn.SocketFd); err == nil {
+			if _, ok := sa.(*unix.SockaddrInet4); ok {
+				rn.family = unix.AF_INET
+			}
+		}
+	}
 	rn.setupTimeouts()
 	return nil
 }
@@ -457,6 +474,10 @@ const (
 
 func (rn *URingNet) armAccept() {
 	if rn.stopping || rn.draining || rn.SocketFd < 0 {
+		return
+	}
+	if rn.packet {
+		rn.armRecvMsg()
 		return
 	}
 	rn.acceptArms++
