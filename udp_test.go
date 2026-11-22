@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-// udpEcho 把数据报原样发回来源地址
+// udpEcho sends every datagram back to its source.
 var udpEcho = PacketHandlerFunc(func(pc *PacketConn, data []byte, from netip.AddrPort) {
 	pc.WriteTo(data, from)
 })
@@ -37,7 +37,7 @@ func servePacket(t *testing.T, network, address string, h PacketHandler, opts ..
 	return s
 }
 
-// udpRoundTrip 发送一个数据报并等待回复
+// udpRoundTrip sends a datagram and waits for the reply.
 func udpRoundTrip(t *testing.T, c net.Conn, msg []byte) []byte {
 	t.Helper()
 	if _, err := c.Write(msg); err != nil {
@@ -73,7 +73,7 @@ func TestUDPEcho(t *testing.T) {
 	}
 }
 
-// 端口为 0、多个 ring：所有 socket 绑定同一个端口，内核把不同来源的数据报分到各个 ring
+// Port 0 with several rings: all sockets bind the same port and the kernel spreads datagrams from different sources over the rings.
 func TestUDPReusePortRings(t *testing.T) {
 	s := servePacket(t, "udp4", "127.0.0.1:0", udpEcho, WithRings(4))
 	var wg sync.WaitGroup
@@ -110,7 +110,7 @@ func TestUDPReusePortRings(t *testing.T) {
 	}
 }
 
-// 超过接收缓冲区的数据报被丢弃并计数，之后的数据报照常处理
+// Datagrams larger than a receive buffer are dropped and counted; later datagrams are handled normally.
 func TestUDPTruncated(t *testing.T) {
 	s := servePacket(t, "udp4", "127.0.0.1:0", udpEcho, WithRings(1), WithBuffers(16, 512))
 	c, err := net.Dial("udp4", s.Addr().String())
@@ -125,7 +125,7 @@ func TestUDPTruncated(t *testing.T) {
 	}
 }
 
-// 绑定端口 0 的 PacketServer 当作 UDP 客户端：AsyncWriteTo 发送，OnPacket 收到回复
+// A PacketServer bound to port 0 as a UDP client: AsyncWriteTo sends, OnPacket gets the reply.
 func TestUDPClient(t *testing.T) {
 	echo, err := net.ListenPacket("udp4", "127.0.0.1:0")
 	if err != nil {
@@ -189,7 +189,7 @@ func TestUDPIPv6(t *testing.T) {
 	}
 }
 
-// 不开 SO_REUSEPORT 时多个 ring 共用一个 socket；反复创建和关闭不泄漏 fd，也不会把 fd 关两次
+// Without SO_REUSEPORT the rings share one socket; creating and closing repeatedly must not leak fds or close an fd twice.
 func TestUDPSharedSocketClose(t *testing.T) {
 	before := openFds(t)
 	for i := 0; i < 5; i++ {
@@ -211,7 +211,7 @@ func TestUDPSharedSocketClose(t *testing.T) {
 	waitFor(t, func() bool { return openFds(t) <= before }, "fds released")
 }
 
-// 并发负载：16 个客户端各发 500 个随机大小的数据报，逐个校验回复
+// Concurrent load: 16 clients send 500 random-size datagrams each and check every reply.
 func TestUDPLoad(t *testing.T) {
 	s := servePacket(t, "udp4", "127.0.0.1:0", udpEcho, WithRings(2), WithBuffers(64, 4096))
 	var wg sync.WaitGroup

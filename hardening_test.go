@@ -16,7 +16,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// onLoop 在 rn 的事件循环线程中执行 fn 并等待它完成（读取只在 Loop 线程中访问的字段）
+// onLoop runs fn on rn's event loop thread and waits for it (to read fields owned by the loop thread).
 func onLoop(t testing.TB, rn *URingNet, fn func()) {
 	t.Helper()
 	done := make(chan struct{})
@@ -30,10 +30,10 @@ func onLoop(t testing.TB, rn *URingNet, fn func()) {
 	}
 }
 
-// fd 用完（EMFILE）时 multishot accept 不能空转：等待时间翻倍地重新提交，fd 释放后恢复 accept
+// When fds run out (EMFILE) the multishot accept must not spin: it re-arms with a doubling wait and accepts again once fds are free.
 func TestAcceptBackoffOnEMFILE(t *testing.T) {
-	// 先调低 fd 上限再启动服务端：内核在提交 accept 请求时记下当时的 RLIMIT_NOFILE，
-	// multishot accept 只提交一次，之后调低上限对它不起作用
+	// Lower the fd limit before starting the server: the kernel records RLIMIT_NOFILE when the accept is submitted,
+	// and the multishot accept is submitted only once, so lowering the limit later would not affect it
 	var old unix.Rlimit
 	if err := unix.Getrlimit(unix.RLIMIT_NOFILE, &old); err != nil {
 		t.Fatal(err)
@@ -52,9 +52,9 @@ func TestAcceptBackoffOnEMFILE(t *testing.T) {
 	loop, addr := startServer(t, h, 1, false)
 	defer loop.Shutdown()
 	rn := loop.RingNet[0]
-	onLoop(t, rn, func() {}) // 确保 accept 已经提交
+	onLoop(t, rn, func() {}) // make sure the accept has been submitted
 
-	// 客户端 socket 先建好：占满 fd 之后 connect 不需要新的 fd，而服务端 accept 会 EMFILE
+	// Create the client socket first: once the fds are used up, connect needs no new fd while the server's accept fails with EMFILE
 	cfd, err := unix.Socket(unix.AF_INET, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -66,8 +66,8 @@ func TestAcceptBackoffOnEMFILE(t *testing.T) {
 	sa := &unix.SockaddrInet4{Port: tcpAddr.Port}
 	copy(sa.Addr[:], tcpAddr.IP.To4())
 
-	// 占满 fd；等待期间持续抢占被释放的 fd（运行时或之前的测试可能异步关闭 fd），
-	// 保证服务端的 accept 一直拿不到 fd
+	// Use up the fds, and keep grabbing any that get freed meanwhile (the runtime or earlier tests may close fds
+	// asynchronously), so the server's accept never gets one
 	var mu sync.Mutex
 	var fillers []int
 	fill := func() {
@@ -107,7 +107,7 @@ func TestAcceptBackoffOnEMFILE(t *testing.T) {
 
 	var before int
 	onLoop(t, rn, func() { before = rn.acceptArms })
-	if err := unix.Connect(cfd, sa); err != nil { // 握手由内核完成，连接留在监听队列中
+	if err := unix.Connect(cfd, sa); err != nil { // the kernel completes the handshake; the connection waits in the backlog
 		close(stop)
 		t.Fatal(err)
 	}
@@ -116,7 +116,7 @@ func TestAcceptBackoffOnEMFILE(t *testing.T) {
 	onLoop(t, rn, func() { arms = rn.acceptArms - before })
 	close(stop)
 	<-absorbed
-	// 退避 5、10、20、40、80、160ms：400ms 内约 6 次；没有退避时是成千上万次
+	// Backoff 5, 10, 20, 40, 80, 160ms: about 6 re-arms in 400ms; without backoff it is many thousands
 	if arms < 1 || arms > 12 {
 		t.Fatalf("accept re-armed %d times in 400ms during EMFILE, want a few", arms)
 	}
@@ -146,8 +146,8 @@ func TestAcceptBackoffOnEMFILE(t *testing.T) {
 	}
 }
 
-// 对端只发不读：发送队列超过 MaxWriteBuffer 时暂停接收，服务端缓存的数据有上限；
-// 对端开始读取后恢复接收，数据完整无误
+// A peer that only writes: above MaxWriteBuffer the server stops receiving, so what it buffers is bounded;
+// once the peer reads, receiving resumes and the data arrives intact.
 func TestBackpressureBoundsQueue(t *testing.T) {
 	const max = 64 << 10
 	h := &testHandler{}
@@ -168,7 +168,7 @@ func TestBackpressureBoundsQueue(t *testing.T) {
 		writeErr <- err
 	}()
 
-	// 等服务端暂停接收、客户端的发送被 TCP 流控挡住，然后看服务端缓存了多少
+	// Wait until the server pauses and TCP flow control blocks the client, then look at what the server buffers
 	waitFor(t, func() bool {
 		var paused bool
 		onLoop(t, rn, func() {
@@ -186,7 +186,7 @@ func TestBackpressureBoundsQueue(t *testing.T) {
 		}
 		pauses = rn.pauses
 	})
-	// 上限 + 暂停生效前最后一批数据（取消完成前已收到的缓冲区）
+	// The limit plus the last batch before the pause took effect (buffers received before the cancellation completed)
 	if queued > max+256*2048 {
 		t.Fatalf("queued %d bytes with MaxWriteBuffer %d", queued, max)
 	}
@@ -210,7 +210,7 @@ func TestBackpressureBoundsQueue(t *testing.T) {
 	t.Logf("queued %d bytes while paused; %d pauses", queued, pauses)
 }
 
-// IdleTimeout：没有收发的连接在超时后被关闭；持续收发的连接不受影响
+// IdleTimeout: a connection with no traffic is closed after the timeout; an active one is not.
 func TestIdleTimeout(t *testing.T) {
 	const idle = 200 * time.Millisecond
 	h := &testHandler{}
@@ -228,7 +228,7 @@ func TestIdleTimeout(t *testing.T) {
 	}
 	defer busy.Close()
 
-	// busy 每 50ms 收发一次，持续 3 倍超时时间
+	// busy exchanges data every 50ms for three times the timeout
 	busyErr := make(chan error, 1)
 	go func() {
 		buf := make([]byte, 4)
@@ -252,7 +252,7 @@ func TestIdleTimeout(t *testing.T) {
 		t.Fatalf("expected the idle connection to be closed, got n=%d err=%v", n, err)
 	}
 	elapsed := time.Since(start)
-	// 超时后 1–1.25 倍时间内关闭；给调度留些余量
+	// Closed within 1-1.25x the timeout; leave some room for scheduling
 	if elapsed < idle || elapsed > 2*idle {
 		t.Fatalf("idle connection closed after %v, want %v–%v", elapsed, idle, 2*idle)
 	}
@@ -262,7 +262,7 @@ func TestIdleTimeout(t *testing.T) {
 	t.Logf("idle connection closed after %v", elapsed)
 }
 
-// WriteTimeout：对端不读，发送队列长时间没有进展时关闭连接
+// WriteTimeout: a peer that does not read is closed once the send queue makes no progress for that long.
 func TestWriteTimeout(t *testing.T) {
 	const wt = 200 * time.Millisecond
 	big := make([]byte, 16<<20)
@@ -278,7 +278,7 @@ func TestWriteTimeout(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c.Close()
-	c.Write([]byte("x")) // 触发 16MB 的响应，但从不读取
+	c.Write([]byte("x")) // triggers a 16MB response that is never read
 	start := time.Now()
 	waitFor(t, func() bool { return h.closed.Load() == 1 }, "close by WriteTimeout")
 	elapsed := time.Since(start)

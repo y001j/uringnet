@@ -80,7 +80,7 @@ func ListenPacket(network, address string, h PacketHandler, opts ...Option) (*Pa
 	if log == nil {
 		log = discardLogger
 	}
-	// 开启 SO_REUSEPORT 时每个 ring 有自己的 socket（由 ring 关闭）；否则共用一个，由 Ringloop 关闭一次
+	// With SO_REUSEPORT each ring has its own socket (closed by the ring); otherwise they share one, closed once by the Ringloop
 	sharedFd := -1
 	for i := 0; i < o.rings; i++ {
 		fd := sharedFd
@@ -94,7 +94,7 @@ func ListenPacket(network, address string, h PacketHandler, opts ...Option) (*Pa
 				return nil, err
 			}
 			if i == 0 {
-				address = boundAddress(address, fd) // 端口为 0 时其余 socket 绑定同一个端口
+				address = boundAddress(address, fd) // with port 0, bind the other sockets to the same port
 				if !reuse {
 					sharedFd = fd
 				}
@@ -204,7 +204,7 @@ func (pc *PacketConn) AsyncWriteTo(b []byte, addr netip.AddrPort, done func(erro
 	})
 }
 
-// packetHandler 让 UDP 的 ring 复用 URingNet 的启动与关闭流程；没有连接，这些回调都不会被调用
+// packetHandler lets UDP rings reuse the URingNet start and shutdown code; with no connections these are never called.
 type packetHandler struct{}
 
 func (packetHandler) boot(*URingNet)        {}
@@ -214,14 +214,14 @@ func (packetHandler) written(*conn)         {}
 func (packetHandler) closed(*conn)          {}
 func (packetHandler) shutdown(*URingNet)    {}
 
-// recvmsg 时为地址预留的空间：足够放下 sockaddr_in6
+// packetNameLen is the room reserved for the source address in recvmsg: enough for a sockaddr_in6.
 const packetNameLen = uint32(unsafe.Sizeof(unix.RawSockaddrInet6{}))
 
-// recvmsgOutLen 是 struct io_uring_recvmsg_out 的大小：namelen、controllen、payloadlen、flags 四个 u32
+// recvmsgOutLen is the size of struct io_uring_recvmsg_out: four u32 (namelen, controllen, payloadlen, flags).
 const recvmsgOutLen = 16
 
-// armRecvMsg 提交 multishot recvmsg（Linux 6.0+）：每个数据报占一个 provided buffer，
-// 缓冲区内依次是 io_uring_recvmsg_out、地址（packetNameLen 字节）和数据
+// armRecvMsg submits a multishot recvmsg (Linux 6.0+): each datagram takes one provided buffer holding
+// io_uring_recvmsg_out, the address (packetNameLen bytes) and the payload.
 func (rn *URingNet) armRecvMsg() {
 	if rn.stopping {
 		return
@@ -240,8 +240,8 @@ func (rn *URingNet) onRecvMsg(res int32, flags uint32) {
 	if flags&iouring_syscall.IORING_CQE_F_MORE != 0 || rn.stopping {
 		return
 	}
-	// multishot 已终止：缓冲区耗尽（数据报已在回调后立即归还）或出错时重新提交；
-	// 持续出错时稍等再提交，避免空转
+	// The multishot recvmsg has ended: re-arm after running out of buffers (datagrams are returned right after
+	// their callback) or after an error; wait a little on persistent errors to avoid spinning
 	if res >= 0 || res == -int32(syscall.ENOBUFS) {
 		if res < 0 {
 			rn.enobufs++
@@ -253,7 +253,7 @@ func (rn *URingNet) onRecvMsg(res int32, flags uint32) {
 	rn.after(10*time.Millisecond, rn.armRecvMsg)
 }
 
-// deliverPacket 解析 recvmsg 写入缓冲区的内容并调用 OnPacket
+// deliverPacket parses what recvmsg wrote into the buffer and calls OnPacket.
 func (rn *URingNet) deliverPacket(buf []byte) {
 	if len(buf) < recvmsgOutLen+int(packetNameLen) {
 		return
@@ -274,7 +274,7 @@ func (rn *URingNet) deliverPacket(buf []byte) {
 	rn.ph.OnPacket(&rn.pc, payload, from)
 }
 
-// parseSockaddr 把内核写出的 sockaddr_in / sockaddr_in6 转为 netip.AddrPort（不分配内存）
+// parseSockaddr converts the sockaddr_in / sockaddr_in6 written by the kernel to a netip.AddrPort without allocating.
 func parseSockaddr(b []byte) netip.AddrPort {
 	if len(b) < 4 {
 		return netip.AddrPort{}
@@ -293,8 +293,8 @@ func parseSockaddr(b []byte) netip.AddrPort {
 	return netip.AddrPort{}
 }
 
-// sendTo 在 Loop 线程中用 sendmsg 发送一个数据报。消息头、iovec、地址和数据放在同一块内存里，
-// 作为请求的 keep 保持存活直到发送完成
+// sendTo sends one datagram with sendmsg on the loop thread. The msghdr, iovec, address and payload share one
+// allocation, kept alive as the request's memory until the send completes.
 func (rn *URingNet) sendTo(b []byte, to netip.AddrPort, done func(error)) error {
 	if rn.stopping {
 		return ErrServerClosed
@@ -317,7 +317,7 @@ func (rn *URingNet) sendTo(b []byte, to netip.AddrPort, done func(error)) error 
 		var sa unix.RawSockaddrInet6
 		sa.Family = unix.AF_INET6
 		putPort(&sa.Port, int(to.Port()))
-		sa.Addr = addr.As16() // IPv4 地址按 IPv4 映射地址发送
+		sa.Addr = addr.As16() // IPv4 destinations are sent as IPv4-mapped addresses
 		raw = unsafe.Slice((*byte)(unsafe.Pointer(&sa)), unsafe.Sizeof(sa))
 	}
 	const align = 8
@@ -326,7 +326,7 @@ func (rn *URingNet) sendTo(b []byte, to netip.AddrPort, done func(error)) error 
 	iovOff := round(hdrOff + unsafe.Sizeof(unix.Msghdr{}))
 	nameOff := round(iovOff + unsafe.Sizeof(unix.Iovec{}))
 	dataOff := round(nameOff + uintptr(len(raw)))
-	mem := make([]byte, dataOff+uintptr(len(b))+1) // +1：空数据报时 iovec 也指向有效内存
+	mem := make([]byte, dataOff+uintptr(len(b))+1) // +1: the iovec points at valid memory even for an empty datagram
 	copy(mem[nameOff:], raw)
 	copy(mem[dataOff:], b)
 	msg := (*unix.Msghdr)(unsafe.Pointer(&mem[hdrOff]))
@@ -354,7 +354,7 @@ func (rn *URingNet) sendTo(b []byte, to netip.AddrPort, done func(error)) error 
 	return nil
 }
 
-// listenUDP 创建并绑定一个阻塞模式的 UDP socket（io_uring 负责异步等待）
+// listenUDP creates and binds a UDP socket in blocking mode (io_uring does the waiting).
 func listenUDP(network, address string, reusePort bool) (int, error) {
 	ua, err := net.ResolveUDPAddr(network, address)
 	if err != nil {

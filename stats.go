@@ -59,7 +59,7 @@ func (s *Server) Stats() Stats {
 	return total
 }
 
-// stats 在 Loop 线程中读取本 ring 的计数器
+// stats reads this ring's counters; loop thread only.
 func (rn *URingNet) stats() Stats {
 	return Stats{
 		Connections:         int64(len(rn.conns)),

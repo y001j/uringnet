@@ -1,5 +1,5 @@
-// 标准库 echo：io.Copy(c, c) 在 Linux 上会走 splice（内核内零拷贝转发，数据不进用户态），
-// 不能代表需要处理数据的服务；公平对比请用 stdcopy。
+// Standard library echo: io.Copy(c, c) uses splice on Linux (zero-copy forwarding in the kernel, data never reaches
+// user space), so it does not represent servers that process data; use stdcopy for a fair comparison.
 
 package main
 

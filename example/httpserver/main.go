@@ -13,14 +13,14 @@ import (
 	"github.com/y001j/uringnet"
 )
 
-// 一个最简 HTTP/1.1 服务，只用于压测：每个以 \r\n\r\n 结尾的请求回复一个固定响应。
-// 连接管理遵循 HTTP 规则：HTTP/1.1 默认长连接，带 "Connection: close" 时回复后关闭；
-// HTTP/1.0 默认回复后关闭，带 "Connection: keep-alive" 时保持（ab 不加 -k 时依赖服务端关闭连接）。
+// A minimal HTTP/1.1 server for benchmarks: every request ending in \r\n\r\n gets a fixed response.
+// Connections follow HTTP rules: HTTP/1.1 is persistent unless "Connection: close", which closes after the
+// response; HTTP/1.0 closes after the response unless "Connection: keep-alive" (ab without -k relies on that).
 type httpServer struct {
 	uringnet.BuiltinHandler
 }
 
-// httpCodec 保存每个连接未处理完的请求数据（请求可能跨多次 recv）和复用的响应缓冲区
+// httpCodec keeps a connection's unprocessed request bytes (requests can span receives) and a reusable response buffer.
 type httpCodec struct {
 	buf []byte
 	out []byte
@@ -31,9 +31,9 @@ var delimiter = []byte("\r\n\r\n")
 type connMode int
 
 const (
-	modeDefault   connMode = iota // HTTP/1.1 长连接，响应里不需要 Connection 头
-	modeKeepAlive                 // HTTP/1.0 + keep-alive：响应里必须回 Connection: keep-alive
-	modeClose                     // 回复后关闭连接
+	modeDefault   connMode = iota // HTTP/1.1 persistent: no Connection header needed in the response
+	modeKeepAlive                 // HTTP/1.0 + keep-alive: the response must say Connection: keep-alive
+	modeClose                     // close after the response
 )
 
 func appendResponse(b []byte, mode connMode) []byte {
@@ -50,10 +50,10 @@ func appendResponse(b []byte, mode connMode) []byte {
 
 var (
 	http10    = []byte("HTTP/1.0")
-	connToken = []byte("onnection:") // 不区分 Connection/connection 的首字母
+	connToken = []byte("onnection:") // matches Connection and connection
 )
 
-// requestMode 根据请求行的协议版本和 Connection 头决定连接如何处理。
+// requestMode decides how to handle the connection from the request line's version and the Connection header.
 func requestMode(header []byte) connMode {
 	line := header
 	if i := bytes.IndexByte(header, '\r'); i >= 0 {
@@ -100,20 +100,20 @@ func (hs *httpServer) OnTraffic(c *uringnet.Conn, data []byte) uringnet.Action {
 		}
 		mode := requestMode(in[:i])
 		out = appendResponse(out, mode)
-		closing = mode == modeClose // 回复后关闭，忽略之后的数据
+		closing = mode == modeClose // close after this response and ignore anything after it
 		in = in[i+len(delimiter):]
 	}
 	if len(out) > 0 {
-		c.Write(out) // 拷贝进发送队列，out 可以复用
+		c.Write(out) // copied into the send queue, so out can be reused
 	}
 	codec.out = out
 	if closing {
-		return uringnet.Close // 已写入的响应发完后关闭
+		return uringnet.Close // close once the responses written are sent
 	}
 	if len(in) > 64*1024 {
-		return uringnet.Close // 请求头过大
+		return uringnet.Close // request header too large
 	}
-	// 保留未处理完的部分（data 在回调后失效，必须拷贝）
+	// Keep the unprocessed part (data is invalid after the callback, so it must be copied)
 	codec.buf = append(codec.buf[:0], in...)
 	return uringnet.None
 }
@@ -124,9 +124,9 @@ func main() {
 		os.Exit(1)
 	}
 	srv, err := uringnet.Listen("tcp", os.Args[1], &httpServer{},
-		// 每个 ring 256 个接收缓冲区：ring 是 FIFO，缓冲区越多拷贝时缓存越冷，够用即可
+		// 256 receive buffers per ring: they are used in FIFO order, so more buffers mean colder caches; enough is best
 		uringnet.WithBuffers(256, 16<<10),
-		// 可选：uringnet.WithBusyPoll(50*time.Microsecond) 降低延迟
+		// Optional: uringnet.WithBusyPoll(50*time.Microsecond) for lower latency
 	)
 	if err != nil {
 		fmt.Println(err)

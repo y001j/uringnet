@@ -16,7 +16,7 @@ import (
 	"time"
 )
 
-// apiEcho 原样回显；split 为 true 时把数据分两段写回，在增量缓冲区下验证同一缓冲区的多段原地发送
+// apiEcho echoes data; with split it writes each chunk back in two slices, to test several in-place sends from one buffer with incremental buffers.
 type apiEcho struct {
 	BuiltinHandler
 	split bool
@@ -55,7 +55,7 @@ func (h *apiEcho) closeErrs() []error {
 	return append([]error(nil), h.errs...)
 }
 
-// serve 启动 Server，返回其地址；测试结束时关闭并检查 Serve 的返回值
+// serve starts a Server and returns its address; at the end of the test it closes it and checks what Serve returned.
 func serve(t *testing.T, h Handler, opts ...Option) (*Server, string) {
 	t.Helper()
 	s, err := Listen("tcp4", "127.0.0.1:0", h, opts...)
@@ -108,16 +108,16 @@ func TestServerCloseReasons(t *testing.T) {
 	peer := dial()
 	peer.Write([]byte("hi"))
 	readN(t, peer, 2)
-	peer.Close() // 对端关闭 -> io.EOF
+	peer.Close() // peer close -> io.EOF
 
 	quit := dial()
-	quit.Write([]byte("quit")) // 服务端 Conn.Close -> nil
+	quit.Write([]byte("quit")) // server-side Conn.Close -> nil
 	if b, _ := io.ReadAll(quit); len(b) != 0 {
 		t.Fatalf("unexpected data %q", b)
 	}
 	quit.Close()
 
-	idle := dial() // 空闲超时 -> ErrIdleTimeout
+	idle := dial() // idle timeout -> ErrIdleTimeout
 	defer idle.Close()
 	idle.SetReadDeadline(time.Now().Add(5 * time.Second))
 	idle.Read(make([]byte, 1))
@@ -131,7 +131,7 @@ func TestServerCloseReasons(t *testing.T) {
 		}
 	}
 
-	open := dial() // 关闭服务器 -> ErrServerClosed
+	open := dial() // server shutdown -> ErrServerClosed
 	defer open.Close()
 	waitFor(t, func() bool { return s.Connections() == 1 }, "connection open")
 	if err := s.Shutdown(context.Background()); err != nil {
@@ -142,7 +142,7 @@ func TestServerCloseReasons(t *testing.T) {
 	}
 }
 
-// closeOnQuit 回显数据，收到 "quit" 时关闭连接
+// closeOnQuit echoes data and closes the connection on "quit".
 type closeOnQuit struct{ apiEcho }
 
 func (h *closeOnQuit) OnTraffic(c *Conn, data []byte) Action {
@@ -163,7 +163,7 @@ func readN(t *testing.T, c net.Conn, n int) []byte {
 	return b
 }
 
-// bigReply 收到任何数据都回复 payload
+// bigReply answers any data with payload.
 type bigReply struct {
 	apiEcho
 	payload []byte
@@ -174,7 +174,7 @@ func (h *bigReply) OnTraffic(c *Conn, data []byte) Action {
 	return None
 }
 
-// 优雅关闭：已经写入的数据全部发出后才关闭连接，空闲连接立即关闭，不再接受新连接
+// Graceful shutdown: connections close only after the data written has been sent, idle ones at once, and no new connections are accepted.
 func TestServerGracefulShutdown(t *testing.T) {
 	payload := make([]byte, 8<<20)
 	rand.Read(payload)
@@ -193,7 +193,7 @@ func TestServerGracefulShutdown(t *testing.T) {
 	defer idle.Close()
 	busy.Write([]byte("go"))
 	waitFor(t, func() bool { return s.Connections() == 2 }, "two connections")
-	time.Sleep(50 * time.Millisecond) // 让服务端把响应排进发送队列
+	time.Sleep(50 * time.Millisecond) // let the server queue the response
 
 	shutdownErr := make(chan error, 1)
 	go func() {
@@ -206,7 +206,7 @@ func TestServerGracefulShutdown(t *testing.T) {
 	if n, err := idle.Read(make([]byte, 1)); n != 0 || err == nil {
 		t.Fatalf("idle connection: n=%d err=%v, want closed", n, err)
 	}
-	time.Sleep(100 * time.Millisecond) // 关闭已经开始、对端还没读完
+	time.Sleep(100 * time.Millisecond) // shutdown has started, the peer has not read everything yet
 	if _, err := net.DialTimeout("tcp4", addr, 500*time.Millisecond); err == nil {
 		t.Fatal("new connection accepted during shutdown")
 	}
@@ -229,7 +229,7 @@ func TestServerGracefulShutdown(t *testing.T) {
 	}
 }
 
-// 对端不读时，优雅关闭在 ctx 到期后强制关闭并返回 ctx 的错误
+// With a peer that does not read, a graceful shutdown forces the close when ctx ends and returns ctx's error.
 func TestServerShutdownDeadline(t *testing.T) {
 	h := &bigReply{payload: make([]byte, 32<<20)}
 	s, addr := serve(t, h, WithRings(1), WithMaxWriteBuffer(-1))
@@ -256,7 +256,7 @@ func TestServerShutdownDeadline(t *testing.T) {
 	}
 }
 
-// AsyncWrite / AsyncClose 可以在其他 goroutine 中调用
+// AsyncWrite / AsyncClose can be called from other goroutines.
 func TestConnAsyncWrite(t *testing.T) {
 	h := &apiEcho{opened: make(chan *Conn, 1)}
 	_, addr := serve(t, h, WithRings(1))
@@ -293,14 +293,14 @@ func TestConnAsyncWrite(t *testing.T) {
 	if err := h.closeErrs()[0]; err != nil {
 		t.Fatalf("OnClose error %v, want nil", err)
 	}
-	// 关闭后的 AsyncWrite 通过 done 报告 ErrConnClosed
+	// AsyncWrite after the close reports ErrConnClosed through done
 	sc.AsyncWrite([]byte("late"), func(err error) { done <- err })
 	if err := <-done; err != ErrConnClosed {
 		t.Fatalf("AsyncWrite after close: %v", err)
 	}
 }
 
-// 端口为 0 且每个 ring 有自己的监听 socket 时，所有 ring 必须绑定同一个端口
+// With port 0 and one listening socket per ring, all rings must bind the same port.
 func TestListenPortZeroReusePort(t *testing.T) {
 	h := &apiEcho{}
 	s, addr := serve(t, h, WithRings(4), WithReusePort(true))
@@ -327,7 +327,7 @@ func TestListenPortZeroReusePort(t *testing.T) {
 	}
 }
 
-// 日志：空闲超时关闭连接时输出 debug 日志
+// Logging: closing an idle connection logs a debug message.
 func TestServerLogger(t *testing.T) {
 	var buf syncBuffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
@@ -358,7 +358,7 @@ func (s *syncBuffer) Bytes() []byte {
 	return append([]byte(nil), s.b.Bytes()...)
 }
 
-// 对端发完数据后半关闭（只关写方向）：服务端仍要把回复发完再关闭
+// The peer half-closes (shuts down its write side) after sending: the server must still send the reply before closing.
 func TestPeerHalfClose(t *testing.T) {
 	h := &apiEcho{}
 	_, addr := serve(t, h, WithRings(1))
@@ -401,7 +401,7 @@ func TestServerStats(t *testing.T) {
 		if i < 2 {
 			c.Close()
 		} else {
-			defer c.Close() // 留着不动，由空闲超时关闭
+			defer c.Close() // left alone, closed by the idle timeout
 		}
 	}
 	waitFor(t, func() bool { return s.Stats().IdleTimeouts == 1 }, "idle timeout counted")

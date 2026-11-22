@@ -12,7 +12,7 @@ import (
 	"testing"
 )
 
-// 显式选择 epoll 后端：TCP 回显、拨号和 UDP 都能工作（不依赖 URINGNET_BACKEND）
+// Explicitly chosen epoll backend: TCP echo, dialing and UDP all work (independent of URINGNET_BACKEND).
 func TestEpollBackend(t *testing.T) {
 	s, addr := serve(t, &apiEcho{}, WithRings(2), WithBackend(BackendEpoll))
 	if s.Backend() != BackendEpoll {
@@ -41,7 +41,7 @@ func TestEpollBackend(t *testing.T) {
 }
 
 func TestBackendSelection(t *testing.T) {
-	// 真实路径上的错误经过 setupError 加了提示，原始 errno 不在错误链里
+	// On the real path setupError adds a hint and the original errno is not in the error chain
 	if !ioURingUnavailable(setupError(fmt.Errorf("iouring_setup: %w", syscall.EPERM))) {
 		t.Error("EPERM (seccomp, kernel.io_uring_disabled) should select the epoll fallback")
 	}
@@ -60,7 +60,7 @@ func TestBackendSelection(t *testing.T) {
 	}
 }
 
-// epoll 后端在缓冲区很少时也要正确：-ENOBUFS 后暂停并恢复接收
+// The epoll backend must also be correct with very few buffers: pause and resume after -ENOBUFS.
 func TestEpollBufferStarvation(t *testing.T) {
 	_, addr := serve(t, &splitEcho{}, WithRings(1), WithBuffers(4, 512), WithBackend(BackendEpoll))
 	data := bytes.Repeat([]byte("0123456789"), 50000)

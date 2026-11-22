@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-// URINGNET_BACKEND=epoll（或 io_uring）让所有测试使用指定的后端；CI 两种都跑
+// URINGNET_BACKEND=epoll (or io_uring) makes all tests use that backend; CI runs both.
 func TestMain(m *testing.M) {
 	switch os.Getenv("URINGNET_BACKEND") {
 	case "epoll":

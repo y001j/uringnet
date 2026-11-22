@@ -100,7 +100,7 @@ func TestEchoConcurrent(t *testing.T) {
 			for _, n := range sizes {
 				msg := make([]byte, n)
 				rand.Read(msg)
-				// 并发写读，避免大消息在双方缓冲区都满时死锁
+				// Write and read concurrently so large messages cannot deadlock with both sides' buffers full
 				go c.Write(msg)
 				got := make([]byte, n)
 				c.SetReadDeadline(time.Now().Add(10 * time.Second))
@@ -126,7 +126,7 @@ func TestEchoConcurrent(t *testing.T) {
 	}
 }
 
-// 缓冲区远少于连接数：零拷贝 send 占用缓冲区导致 -ENOBUFS，验证暂停/恢复接收后数据完整
+// Far fewer buffers than connections: in-place sends hold buffers and cause -ENOBUFS; data must stay intact across pause/resume.
 func TestBufferStarvation(t *testing.T) {
 	h := &testHandler{}
 	loop, addr := startServerBufs(t, h, 1, false, 4)
@@ -165,7 +165,7 @@ func TestBufferStarvation(t *testing.T) {
 	}
 }
 
-// 客户端不读、服务端持续写大量数据：验证在途 send 与 pending 合并、短写和关闭时不泄漏
+// The client does not read while the server keeps writing: in-flight and pending sends, short writes and closing must not leak.
 func TestPeerCloseDuringSend(t *testing.T) {
 	big := make([]byte, 256<<10)
 	h := &testHandler{traffic: func(d *UserData) Action {
@@ -235,7 +235,7 @@ func TestCloseAction(t *testing.T) {
 	waitFor(t, func() bool { return h.closed.Load() == 1 }, "OnClose")
 }
 
-// WriteBuf = Buffer 后框架必须丢弃 WriteBuf，下次 append 不能写进已归还的接收缓冲区
+// After WriteBuf = Buffer the package must drop WriteBuf, so the next append cannot write into a returned receive buffer.
 func TestWriteBufAliasReset(t *testing.T) {
 	var aliasLeft atomic.Bool
 	h := &testHandler{}
@@ -289,7 +289,7 @@ func TestShutdown(t *testing.T) {
 	}
 }
 
-// echo 客户端：多个连接并发收发随机数据并校验
+// runEchoClients: several connections send random data concurrently and check the echo.
 func runEchoClients(t *testing.T, addr string, conns int, sizes []int) {
 	t.Helper()
 	var wg sync.WaitGroup
@@ -328,7 +328,7 @@ func runEchoClients(t *testing.T, addr string, conns int, sizes []int) {
 	}
 }
 
-// 零拷贝发送：原地发送接收缓冲区使用 SEND_ZC（固定缓冲区），缓冲区在通知到达后才归还
+// Zero-copy send: in-place sends of receive buffers use SEND_ZC (fixed buffers); buffers return only after the notification.
 func TestZeroCopyEcho(t *testing.T) {
 	h := &testHandler{}
 	loop, addr := startServerCfg(t, h, 2, false, 64, func(rn *URingNet) { rn.ZeroCopyThreshold = 512 })
@@ -351,7 +351,7 @@ func TestZeroCopyEcho(t *testing.T) {
 		t.Error("SEND_ZC was never used")
 	}
 	waitFor(t, func() bool { return h.closed.Load() == 16 }, "OnClose")
-	// 所有被占用的接收缓冲区都已归还（通知 CQE 都已处理）
+	// Every held receive buffer has been returned (all notification CQEs handled)
 	for _, rn := range loop.RingNet {
 		waitFor(t, func() bool {
 			res := make(chan int, 1)
@@ -361,7 +361,7 @@ func TestZeroCopyEcho(t *testing.T) {
 	}
 }
 
-// WriteNoCopy：数据按顺序发出（先于本次的 WriteBuf），release 每个缓冲区恰好调用一次
+// WriteNoCopy: data goes out in order (before WriteBuf of the same callback), and release is called exactly once per buffer.
 func TestWriteNoCopy(t *testing.T) {
 	big := make([]byte, 300<<10)
 	rand.Read(big)
@@ -383,7 +383,7 @@ func TestWriteNoCopy(t *testing.T) {
 		}
 		want := append(append([]byte(nil), big...), "END"...)
 		for i := 0; i < 5; i++ {
-			c.Write([]byte("x")) // 1 字节：TCP 是字节流，多字节的写入可能被拆成多次 OnTraffic
+			c.Write([]byte("x")) // 1 byte: TCP is a stream, so a longer write could arrive as several OnTraffic calls
 			got := make([]byte, len(want))
 			c.SetReadDeadline(time.Now().Add(10 * time.Second))
 			if _, err := io.ReadFull(c, got); err != nil {
@@ -410,7 +410,7 @@ func TestSpinTimeEcho(t *testing.T) {
 	}
 }
 
-// 聚集发送：WriteNoCopy 的大块与 WriteBuf 的小尾巴不能合并，用一次 sendmsg 发出
+// Gather send: a large WriteNoCopy chunk and a small WriteBuf tail cannot be merged and go out in one sendmsg.
 func TestGatherSend(t *testing.T) {
 	big := make([]byte, 64<<10)
 	rand.Read(big)
@@ -449,7 +449,7 @@ func TestGatherSend(t *testing.T) {
 	}
 }
 
-// recv bundle 只在包含数据正确性修复的内核（6.16+）上测试
+// Recv bundles are tested only on kernels with the data-corruption fixes (6.16+).
 func TestRecvBundleEcho(t *testing.T) {
 	if !bundleSafeKernel() {
 		t.Skip("recv bundle needs Linux 6.16+ (earlier kernels have known data-gap bugs)")
@@ -463,7 +463,7 @@ func TestRecvBundleEcho(t *testing.T) {
 	runEchoClients(t, addr, 32, []int{1, 100, 2048, 2049, 65536, 1 << 20})
 }
 
-// 增量消费的 buffer ring：少量大缓冲区，多个连接的数据交错写入，原地发送多段
+// Incremental buffer ring: a few large buffers, data of several connections interleaved, several slices sent in place.
 func TestIncrementalBuffersEcho(t *testing.T) {
 	h := &testHandler{}
 	loop, addr := startServerCfg(t, h, 2, false, 8, func(rn *URingNet) {
@@ -485,8 +485,8 @@ func TestIncrementalBuffersEcho(t *testing.T) {
 	}
 }
 
-// 增量消费：少量大缓冲区、大量连接时缓冲区会耗尽（-ENOBUFS），连接在任意时刻突然关闭。
-// 回归测试：曾经出现等待缓冲区的连接再也不被唤醒、服务端卡死的问题。
+// Incremental: with few large buffers and many connections the buffers run out (-ENOBUFS) while connections close at random.
+// Regression test: connections waiting for buffers were once never woken and the server hung.
 func TestIncrementalBuffersNoStall(t *testing.T) {
 	h := &testHandler{}
 	loop, addr := startServerCfg(t, h, 1, false, 8, func(rn *URingNet) {
@@ -540,7 +540,7 @@ func TestIncrementalBuffersNoStall(t *testing.T) {
 				last = n
 			}
 		}
-		close(stop) // 在任意时刻关闭，可能有在途的数据
+		close(stop) // close at an arbitrary moment, possibly with data in flight
 		wg.Wait()
 		waitFor(t, func() bool {
 			res := make(chan [4]int, 1)
@@ -551,8 +551,8 @@ func TestIncrementalBuffersNoStall(t *testing.T) {
 	}
 }
 
-// 增量缓冲区 + 零拷贝发送（跨机器压测里的 uringnet-best-zc 组合）：原地发送的片段用 SEND_ZC，
-// 片段引用要等通知 CQE 到达后才释放
+// Incremental buffers + zero-copy send (uringnet-best-zc in the cross-machine benchmark): slices sent in place use SEND_ZC,
+// and their references are released only after the notification CQE.
 func TestIncrementalBuffersZeroCopy(t *testing.T) {
 	h := &testHandler{}
 	loop, addr := startServerCfg(t, h, 2, false, 32, func(rn *URingNet) {
@@ -600,7 +600,7 @@ func waitFor(t testing.TB, cond func() bool, what string) {
 	}
 }
 
-// ---- 基准测试：c 个长连接 ping-pong ----
+// ---- benchmarks: c persistent connections, ping-pong ----
 
 func benchPingPong(b *testing.B, addr string, conns, size int) {
 	msg := make([]byte, size)

@@ -36,8 +36,8 @@ type Server struct {
 	stopOnce sync.Once
 }
 
-// defaultSQSize 是 Listen 的默认 SQ 大小。实测（单核服务端，512 连接管道化）SQ 从 4096 降到 256
-// 吞吐没有变化，而 SQ 4096 时每个 ring 锁定约 550KB 内存，常见的 8MB RLIMIT_MEMLOCK 下只能建 15 个 ring。
+// defaultSQSize is Listen's default SQ size. Measured (server on 1 core, 512 connections pipelined), SQ 4096 down to 256 made no
+// throughput difference, while at 4096 each ring locks about 550KB, so the common 8MB RLIMIT_MEMLOCK allowed only 15 rings.
 const defaultSQSize = 512
 
 // Option configures a Server; see the With* functions.
@@ -145,7 +145,7 @@ func Listen(network, address string, h Handler, opts ...Option) (*Server, error)
 	return newServer(network, address, h, opts)
 }
 
-// newServer 创建 Server；network 为空时不监听（NewClient）
+// newServer creates a Server; with an empty network it does not listen (NewClient).
 func newServer(network, address string, h Handler, opts []Option) (*Server, error) {
 	if h == nil {
 		return nil, fmt.Errorf("uringnet: nil Handler")
@@ -155,7 +155,7 @@ func newServer(network, address string, h Handler, opts []Option) (*Server, erro
 	for _, opt := range opts {
 		opt(&o)
 	}
-	// Unix socket 不支持 SO_REUSEPORT（所有 ring 共享一个监听 socket）
+	// Unix sockets do not support SO_REUSEPORT (all rings share one listening socket)
 	sockOpts := socket.SocketOptions{ReusePort: o.reusePort && network != "unix"}
 	if o.noDelay {
 		sockOpts.TCPNoDelay = socket.TCPNoDelay
@@ -285,7 +285,7 @@ func (s *Server) Close() error {
 	s.stopOnce.Do(func() {
 		s.closed.Store(true)
 		if !s.served.Load() {
-			// 没有 Serve 过：Serve 中 Wait 不会被调用，这里直接关闭
+			// Never served: Serve will not call Wait, so close directly here
 			s.served.Store(true)
 		}
 		s.loop.Shutdown()

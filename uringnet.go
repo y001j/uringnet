@@ -23,10 +23,10 @@ import (
 	socket "github.com/y001j/uringnet/sockets"
 )
 
-// DefaultBufferSize 是 provided buffer ring 中单个接收缓冲区的默认大小
+// DefaultBufferSize is the default size of one receive buffer.
 const DefaultBufferSize = 16384
 
-// DefaultMaxWriteBuffer 是每个连接发送队列的默认上限，见 URingNet.MaxWriteBuffer
+// DefaultMaxWriteBuffer is the default per-connection send queue limit; see URingNet.MaxWriteBuffer.
 const DefaultMaxWriteBuffer = 4 << 20
 
 var (
@@ -38,7 +38,7 @@ var (
 	ErrIOUringUnavailable = stderrors.New("uringnet: io_uring is not available")
 )
 
-// discardLogger 是默认的日志：什么也不输出
+// discardLogger is the default logger: it drops everything.
 var discardLogger = slog.New(discardHandler{})
 
 type discardHandler struct{}
@@ -48,128 +48,128 @@ func (discardHandler) Handle(context.Context, slog.Record) error { return nil }
 func (d discardHandler) WithAttrs([]slog.Attr) slog.Handler      { return d }
 func (d discardHandler) WithGroup(string) slog.Handler           { return d }
 
-// URingNet 是一个 io_uring 事件循环实例。
+// URingNet is one event loop (a "ring") of the deprecated API; Server and Client use it internally.
 //
-// 每个 URingNet 独占一个 iouring.Loop（一个 io_uring + 一个锁定的 OS 线程），
-// 所有回调（OnOpen/OnTraffic/OnWritten/OnClose）都在该线程中执行，不能阻塞。
+// Each URingNet owns an event loop backend (one io_uring or epoll instance and one locked OS
+// thread). All callbacks run on that thread and must not block.
 type URingNet struct {
-	Addr     string                // 监听地址
-	Type     socket.NetAddressType // 连接类型
-	SocketFd int                   // 监听 socket fd
-	Handler  EventHandler          // 事件回调
+	Addr     string                // listening address
+	Type     socket.NetAddressType // network
+	SocketFd int                   // listening socket, -1 for a client
+	Handler  EventHandler          // callbacks (deprecated API)
 
-	// 以下配置需在 SetLoops 之前设置
+	// The fields below must be set before SetLoops.
 
-	// BufferSize 为单个接收缓冲区的字节数，默认 DefaultBufferSize
+	// BufferSize is the size of one receive buffer in bytes (default DefaultBufferSize).
 	BufferSize int
 
-	// SpinTime 为事件循环阻塞前的忙轮询时长（0 表示不轮询）。
-	// 以 CPU 换取更低的延迟，在唤醒代价高的环境（虚拟机）和中低并发下收益明显，建议 50µs。
-	// 默认自适应：满载（每轮积压大量完成事件）时自动停止轮询，以免降低吞吐。
+	// SpinTime is how long the event loop busy-polls for completions before blocking (0: never).
+	// It trades CPU for latency and helps most where wake-ups are expensive (VMs) and at low to
+	// medium load; 50µs is a good start. Adaptive by default: polling stops while the loop is fully loaded.
 	SpinTime time.Duration
 
-	// SpinFixed 为 true 时不论负载总是轮询（关闭自适应）
+	// SpinFixed polls regardless of load (no adaptation).
 	SpinFixed bool
 
-	// 自适应轮询的阈值：每轮事件循环平均处理的完成事件数达到 SpinBusyBatch 时停止轮询，
-	// 低于 SpinIdleBatch 时恢复。0 表示使用默认值（128 / 64）。调大则在更高负载下继续轮询
-	// （更看重延迟），调小则更早停止（更看重吞吐和 CPU）。
+	// Adaptive polling thresholds: polling stops when the loop handles SpinBusyBatch completions per
+	// iteration on average and resumes below SpinIdleBatch. 0 means the defaults (128 / 64). Higher
+	// values keep polling under more load (favouring latency), lower ones stop earlier (throughput, CPU).
 	SpinBusyBatch int
 	SpinIdleBatch int
 
-	// ZeroCopyThreshold 大于 0 时开启零拷贝发送（IORING_OP_SEND_ZC，Linux 6.0+）：
-	// 不小于该字节数的原地发送（WriteBuf 指向接收缓冲区）和 WriteNoCopy 数据使用 SEND_ZC，
-	// 内核直接从这块内存发送，不再拷贝到 socket 缓冲区。接收缓冲区同时注册为固定缓冲区
-	// 零拷贝 pin 住的页计入 RLIMIT_MEMLOCK（ulimit -l）：注册失败时退回不注册，
-	// SEND_ZC 返回 ENOMEM 时本实例自动关闭零拷贝、改用普通 send。
-	// 零拷贝一般在 10KB 以上才划算；发往本机（回环）的数据内核总会拷贝，没有收益。
+	// ZeroCopyThreshold > 0 enables zero-copy send (IORING_OP_SEND_ZC, Linux 6.0+) for in-place sends
+	// (WriteBuf pointing into the receive buffer) and WriteNoCopy data of at least this many bytes:
+	// the kernel transmits straight from that memory. The receive buffers are also registered as fixed
+	// buffers; their pinned pages count against RLIMIT_MEMLOCK, and registration falls back to none,
+	// and SEND_ZC to normal sends on ENOMEM. Worth it from about 10KB up; never on loopback, where the
+	// kernel copies anyway.
 	ZeroCopyThreshold int
 
-	// RecvBundle 控制 recv bundle（一次接收连续填充多个缓冲区，socket 中积压数据多时显著减少
-	// 完成事件与回调次数）。默认 BundleAuto：仅在 Linux 6.16+ 上启用。6.10–6.15 的内核
-	// 存在会使接收数据出现空洞的 bug（上游修复 3a08988123c8、26ec15e4b0c1、178b8ff66ff8，
-	// 可能已回移到部分稳定版本），BundleOn 强制启用，仅用于测试或确认内核已包含修复的场景。
+	// RecvBundle controls recv bundles (one completion fills several consecutive buffers, which cuts
+	// completions and callbacks when data piles up). BundleAuto (default) enables them on Linux 6.16+
+	// only: 6.10–6.15 can leave gaps in the received data (fixed upstream by 3a08988123c8, 26ec15e4b0c1,
+	// 178b8ff66ff8, possibly backported). BundleOn forces them, for tests or kernels known to be fixed.
 	RecvBundle BundleMode
 
-	// IncrementalBuffers（实验性）使用增量消费的 buffer ring（Linux 6.12+）：少量大缓冲区被多次接收
-	// 连续填充，一个连接可以原地发送多段数据而不拷贝。建议配合较大的 BufferSize（如 64KB）和较少的
-	// 缓冲区数量。启用后不使用 recv bundle；内核不支持时自动退回普通模式。
+	// IncrementalBuffers (experimental) uses an incrementally consumed buffer ring (Linux 6.12+): a few
+	// large buffers are filled by many receives in a row, so a connection can send several received
+	// slices in place. Use a large BufferSize (e.g. 64KB) and few buffers. Disables recv bundles; falls back when unsupported.
 	IncrementalBuffers bool
 
-	// MaxWriteBuffer 为每个连接发送队列中待发送字节数的上限（背压）。超过时暂停接收该连接的数据
-	// （不再调用 OnTraffic），队列降到一半以下时恢复。这样不读数据的对端不会让服务端无限缓存：
-	// 接收暂停后对端的发送也会被 TCP 流控挡住。0 表示使用 DefaultMaxWriteBuffer，负数表示不限制。
-	// 单次回调写入的数据不会被拒绝，所以队列可能短暂超过上限。
+	// MaxWriteBuffer limits the bytes queued per connection (backpressure). Above it the connection
+	// stops receiving (no OnTraffic) until the queue drains below half, so a peer that does not read
+	// cannot make the server buffer without limit: TCP flow control then stops the peer too.
+	// 0 means DefaultMaxWriteBuffer, negative means no limit. Data written in one callback is never refused, so the queue may briefly exceed it.
 	MaxWriteBuffer int
 
-	// IdleTimeout 大于 0 时，连接在这段时间内既没有收到也没有发出数据就被关闭。
+	// IdleTimeout > 0 closes connections that neither receive nor send data for that long.
 	IdleTimeout time.Duration
 
-	// WriteTimeout 大于 0 时，发送队列中有数据、但这段时间内发送没有任何进展（对端不读取）就关闭连接。
-	// 与 MaxWriteBuffer 配合，可以清理只发不读或已经失联的对端。
+	// WriteTimeout > 0 closes connections whose queued data makes no progress for that long (a peer
+	// that stopped reading). Together with MaxWriteBuffer it clears out stuck or vanished peers.
 	WriteTimeout time.Duration
 
-	// Logger 接收运行中的异常和回退（accept 失败、零拷贝回退等），nil 表示不输出
+	// Logger receives warnings about recovered failures (accept errors, fallbacks); nil logs nothing.
 	Logger *slog.Logger
 
-	// Backend 选择事件循环的实现，默认 BackendAuto（io_uring 不可用时退回 epoll）
+	// Backend selects the event loop implementation; BackendAuto (default) falls back to epoll when io_uring is unavailable.
 	Backend Backend
 
 	index      int
 	entries    uint32
-	ownsSocket bool // SocketFd 是否由本实例独占（ReusePort 时每个实例一个监听 socket）
+	ownsSocket bool // SocketFd belongs to this ring alone (one listening socket per ring with ReusePort)
 
-	h        connHandler // 回调：旧 API 时包装 Handler，新 API 时包装 Server 的 Handler
+	h        connHandler // callbacks: the deprecated Handler or a Server's Handler
 	log      *slog.Logger
 	loop     eventLoop
 	br       bufRing
-	backend  Backend // 实际使用的后端
+	backend  Backend // backend in use
 	ringloop *Ringloop
 
-	// 以下字段仅在 Loop 线程中访问
+	// The fields below are only accessed on the loop thread.
 	conns       map[int]*conn
-	held        int     // 被发送队列占用的接收缓冲区数量
-	maxHeld     int     // 原地发送最多占用的接收缓冲区数量（缓冲区总数的一半）
-	starved     []*conn // 因缓冲区耗尽（-ENOBUFS）而暂停接收的连接
+	held        int     // receive buffers held by send queues
+	maxHeld     int     // maximum buffers held by in-place sends (half of them)
+	starved     []*conn // connections whose receiving stopped with -ENOBUFS
 	stopping    bool
-	draining    bool // 优雅关闭中：不再接受新连接，现有连接发完数据后关闭
-	noDelay     bool // 拨出的 TCP 连接设置 TCP_NODELAY
-	fixedIdx    int  // 接收缓冲区的固定缓冲区下标，-1 表示未注册
-	zcOff       bool // 内核不支持零拷贝时自动关闭
-	zcSends     int  // SEND_ZC 次数（测试用）
-	bundle      bool // 是否使用 recv bundle
+	draining    bool // graceful shutdown: no new connections, existing ones close after flushing
+	noDelay     bool // set TCP_NODELAY on dialed connections
+	fixedIdx    int  // fixed-buffer index of the receive buffers, -1 if not registered
+	zcOff       bool // zero-copy send turned off (unsupported, or epoll)
+	zcSends     int  // SEND_ZC sends (stats, tests)
+	bundle      bool // recv bundles in use
 	bundleBufs  []iouring.BundleBuf
-	inc         bool    // 是否使用增量消费的 buffer ring
-	incRefs     []int32 // 增量消费：缓冲区被原地发送的片段引用数
-	incDone     []bool  // 增量消费：内核已用完该缓冲区
-	incPinned   int     // 增量消费：有片段引用的缓冲区数量
-	gatherSends int     // sendmsg 聚集发送次数（测试用）
-	maxWrite    int     // 生效的 MaxWriteBuffer，<= 0 表示不限制
-	pauses      int     // 因背压暂停接收的次数（测试用）
+	inc         bool    // incremental buffer ring in use
+	incRefs     []int32 // incremental: slices of each buffer referenced by in-place sends
+	incDone     []bool  // incremental: the kernel has finished filling the buffer
+	incPinned   int     // incremental: buffers with at least one referenced slice
+	gatherSends int     // sendmsg gather sends (tests)
+	maxWrite    int     // effective MaxWriteBuffer, <= 0 for no limit
+	pauses      int     // receive pauses caused by backpressure
 	nopH        iouring.Handler
 
-	// 超时检查：每 tickEvery 一个节拍，连接记录最近一次活动的节拍号（粗粒度时钟，不读系统时间）
+	// Timeouts: a tick every tickEvery; connections record the tick of their last activity (a coarse clock, no time reads).
 	tick                  uint64
 	tickEvery             time.Duration
-	idleTicks, writeTicks uint64 // 超过这么多个节拍没有活动/发送进展就关闭；0 表示不检查
+	idleTicks, writeTicks uint64 // close after this many ticks without activity / send progress; 0 disables
 
-	acceptBackoff time.Duration // accept 出错后重新提交前的等待时间，成功 accept 后清零
-	acceptArms    int           // 提交 accept 的次数（测试用）
-	timeouts      int           // 因超时关闭的连接数（测试用）
+	acceptBackoff time.Duration // wait before re-arming a failed accept, reset after a successful one
+	acceptArms    int           // accept submissions (tests)
+	timeouts      int           // connections closed by a timeout (tests)
 
-	// 运行指标（Server.Stats），只在 Loop 线程中更新
+	// Counters for Server.Stats, updated on the loop thread only.
 	accepted, acceptErrs    uint64
 	bytesIn, bytesOut       uint64
-	enobufs                 uint64 // multishot recv 因缓冲区耗尽（-ENOBUFS）而终止的次数
+	enobufs                 uint64 // multishot receives ended by -ENOBUFS
 	idleCloses, writeCloses uint64
-	dialed                  uint64 // 拨出并建立的连接数
+	dialed                  uint64 // outgoing connections established
 
 	// UDP（ListenPacket）
-	packet                bool // 数据包模式：没有连接，multishot recvmsg 收数据报
+	packet                bool // packet mode: no connections, datagrams via multishot recvmsg
 	ph                    PacketHandler
 	pc                    PacketConn
-	recvMsg               unix.Msghdr // multishot recvmsg 的消息头（只用到地址长度）
-	family                int         // socket 的协议族（AF_INET / AF_INET6）
+	recvMsg               unix.Msghdr // msghdr of the multishot recvmsg (only the name length is used)
+	family                int         // address family of the socket (AF_INET / AF_INET6)
 	packetsIn, packetsOut uint64
 	truncated, sendErrs   uint64
 
@@ -178,36 +178,36 @@ type URingNet struct {
 	shutdownOnce sync.Once
 }
 
-// UserData 是一个连接在回调中的视图，每个连接一个，在连接的整个生命周期内复用。
+// UserData is a connection as seen by the deprecated callbacks: one per connection, reused for its lifetime.
 //
 // Deprecated: use Handler, which receives a *Conn. UserData will be removed in a later release.
 type UserData struct {
 	Fd int32
 
-	// Buffer 为本次 OnTraffic 收到的数据，只在 OnTraffic 执行期间有效，
-	// 之后其内存会被归还给内核复用；需要保留时请拷贝。
+	// Buffer holds the data of the current OnTraffic call. It is only valid during the call;
+	// its memory goes back to the kernel afterwards, so copy what you need to keep.
 	Buffer  []byte
 	BufSize int32
 
-	// WriteBuf 为要发送给对端的数据，在 OnOpen/OnTraffic 中设置并返回 Echo/Write/EchoAndClose。
-	// 框架会拷贝 WriteBuf 的内容，回调返回后即可复用（框架会把它重置为长度 0）。
+	// WriteBuf is data to send to the peer: set it in OnOpen/OnTraffic and return Echo/Write/EchoAndClose.
+	// It is copied (or sent in place when it points into Buffer) and reset to length 0 after the callback.
 	WriteBuf []byte
 
-	// Context 为用户自定义的连接上下文
+	// Context holds user-defined per-connection state.
 	Context interface{}
 
 	c *conn
 }
 
-// WriteNoCopy 把 b 加入发送队列而不拷贝，只能在回调中（事件循环线程）调用。
-// 内核不再使用 b 后（发送完成；零拷贝时为通知到达后）调用 release（可为 nil），在此之前不能修改 b。
-// 开启 ZeroCopyThreshold 且 b 足够大时使用 SEND_ZC 零拷贝发送。
-// 它会立即入队，因此先于本次回调返回后才处理的 WriteBuf 发出。连接已关闭时立即调用 release 并返回错误。
+// WriteNoCopy queues b without copying it. It must be called from a callback (the event loop thread).
+// release (may be nil) is called once the kernel no longer uses b (after the send, or the zero-copy notification); do not modify b before.
+// With ZeroCopyThreshold set and b large enough, b is sent with SEND_ZC.
+// b is queued at once, so it goes out before WriteBuf of the same callback. On a closed connection release is called at once and an error returned.
 func (d *UserData) WriteNoCopy(b []byte, release func()) error {
 	return d.c.writeNoCopy(b, release)
 }
 
-// RemoteAddr 返回对端地址
+// RemoteAddr returns the peer address.
 func (d *UserData) RemoteAddr() net.Addr {
 	sa, err := unix.Getpeername(int(d.Fd))
 	if err != nil {
@@ -216,7 +216,7 @@ func (d *UserData) RemoteAddr() net.Addr {
 	return sockaddrToNetAddr(sa)
 }
 
-// LocalAddr 返回本端地址
+// LocalAddr returns the local address.
 func (d *UserData) LocalAddr() net.Addr {
 	sa, err := unix.Getsockname(int(d.Fd))
 	if err != nil {
@@ -225,16 +225,16 @@ func (d *UserData) LocalAddr() net.Addr {
 	return sockaddrToNetAddr(sa)
 }
 
-// BundleMode 见 URingNet.RecvBundle
+// BundleMode selects whether recv bundles are used; see URingNet.RecvBundle.
 type BundleMode int
 
 const (
-	BundleAuto BundleMode = iota // Linux 6.16+ 且内核支持时启用
-	BundleOn                     // 内核支持时启用（不检查版本）
-	BundleOff                    // 不使用
+	BundleAuto BundleMode = iota // on Linux 6.16+ when the kernel supports them
+	BundleOn                     // whenever the kernel supports them (no version check)
+	BundleOff                    // never
 )
 
-// bundleSafeKernel 判断内核是否包含 recv bundle 的数据正确性修复（主线 6.16）
+// bundleSafeKernel reports whether the kernel has the recv bundle data-corruption fixes (mainline 6.16).
 func bundleSafeKernel() bool {
 	var u unix.Utsname
 	if unix.Uname(&u) != nil {
@@ -245,7 +245,7 @@ func bundleSafeKernel() bool {
 	return major > 6 || (major == 6 && minor >= 16)
 }
 
-// NetAddress 描述监听地址
+// NetAddress describes a listening address.
 //
 // Deprecated: Listen takes the network and address directly.
 type NetAddress struct {
@@ -253,11 +253,11 @@ type NetAddress struct {
 	Address  string
 }
 
-// New 创建单个 URingNet 实例，Handler 需在 SetLoops 之前设置。
+// New creates a single URingNet; set Handler before SetLoops.
 //
-// size 为 SQ 大小（内核会向上取整为 2 的幂）。sqpoll 已不再使用：
-// 事件循环改为 SINGLE_ISSUER/DEFER_TASKRUN 模式，每轮只有一次 io_uring_enter，
-// 不需要额外的 SQPOLL 内核线程空转。
+// size is the SQ size (rounded up to a power of 2 by the kernel). sqpoll is ignored: the loop uses
+// SINGLE_ISSUER/DEFER_TASKRUN with one io_uring_enter per iteration and needs no SQPOLL kernel
+// thread spinning.
 //
 // Deprecated: use Listen.
 func New(addr NetAddress, size uint, sqpoll bool, options socket.SocketOptions) (*URingNet, error) {
@@ -268,15 +268,15 @@ func New(addr NetAddress, size uint, sqpoll bool, options socket.SocketOptions) 
 	return rings[0], nil
 }
 
-// NewMany 创建 num 个 URingNet 实例，之后需调用 SetLoops 和 Ringloop.RunMany 启动。
+// NewMany creates num URingNets; start them with SetLoops and Ringloop.RunMany.
 //
-//	@param size   SQ 大小，内核会向上取整为 2 的幂
-//	@param sqpoll 已废弃，保留以兼容旧接口
-//	@param num    实例（事件循环）数量
+//	@param size   SQ size, rounded up to a power of 2 by the kernel
+//	@param sqpoll ignored, kept for compatibility
+//	@param num    number of rings (event loops)
 //
-// options.ReusePort 为 true 时每个实例创建自己的监听 socket，由内核在它们之间均衡新连接；
-// 否则所有实例共享一个监听 socket。
-// 目前只支持面向流的协议（tcp/tcp4/tcp6/unix）。
+// With options.ReusePort each ring gets its own listening socket and the kernel balances new
+// connections across them; otherwise all rings share one listening socket.
+// Only stream protocols (tcp/tcp4/tcp6/unix) are supported.
 //
 // Deprecated: use Listen with options (WithRings, WithBuffers, ...).
 func NewMany(addr NetAddress, size uint, sqpoll bool, num int, options socket.SocketOptions, handler EventHandler) ([]*URingNet, error) {
@@ -315,7 +315,7 @@ func NewMany(addr NetAddress, size uint, sqpoll bool, num int, options socket.So
 				return nil, err
 			}
 			if i == 0 && perRing && num > 1 {
-				// 端口为 0 时各个监听 socket 会绑到不同的随机端口：其余的改用第一个实际得到的端口
+				// With port 0 each listening socket would get its own random port: bind the rest to the first one's
 				addr.Address = boundAddress(addr.Address, fd)
 			}
 			if !perRing {
@@ -337,7 +337,7 @@ func NewMany(addr NetAddress, size uint, sqpoll bool, num int, options socket.So
 	return rings, nil
 }
 
-// boundAddress 在 address 的端口为 0 时返回带上 fd 实际端口的地址，否则原样返回
+// boundAddress returns address with fd's actual port if address has port 0, otherwise address unchanged.
 func boundAddress(address string, fd int) string {
 	host, port, err := net.SplitHostPort(address)
 	if err != nil || port != "0" {
@@ -373,7 +373,7 @@ func listen(addr NetAddress, options socket.SocketOptions) (int, error) {
 	if fd < 0 {
 		return -1, errors.ErrInvalidSocketFd
 	}
-	// io_uring 负责异步等待，fd 使用阻塞模式：对 O_NONBLOCK 的 fd，部分内核会直接返回 -EAGAIN
+	// The fd stays in blocking mode for io_uring, which does the waiting: some kernels return -EAGAIN at once for O_NONBLOCK fds
 	if err := unix.SetNonblock(fd, false); err != nil {
 		unix.Close(fd)
 		return -1, fmt.Errorf("%w: %v", errors.ErrSocketCreation, err)
@@ -381,7 +381,7 @@ func listen(addr NetAddress, options socket.SocketOptions) (int, error) {
 	return fd, nil
 }
 
-// start 创建事件循环，在 SetLoops 中调用
+// start creates the event loop; called by SetLoops.
 func (rn *URingNet) start(bufferCount int) error {
 	if rn.h == nil {
 		if rn.Handler == nil {
@@ -421,11 +421,11 @@ func (rn *URingNet) start(bufferCount int) error {
 	rn.backend = BackendEpoll
 	rn.maxHeld = bufferCount / 2
 	rn.fixedIdx = -1
-	rn.zcOff = true // epoll 没有零拷贝发送
+	rn.zcOff = true // no zero-copy send on epoll
 	return rn.finishStart()
 }
 
-// startURing 创建 io_uring 事件循环，按需退回不支持的功能
+// startURing creates the io_uring event loop, falling back where features are unsupported.
 func (rn *URingNet) startURing(bufferCount int) error {
 	if err := checkKernel(); err != nil {
 		return err
@@ -441,13 +441,13 @@ func (rn *URingNet) startURing(bufferCount int) error {
 	}
 	l, err := newURingLoop(cfg)
 	if err != nil && cfg.BufferRings[0].Incremental && !unavailable(err) {
-		// 内核不支持增量消费（6.12 之前），退回普通 buffer ring
+		// No incremental buffer rings (before 6.12): use a normal buffer ring
 		rn.log.Info("uringnet: incremental buffers not supported, using a normal buffer ring", "ring", rn.index, "err", err)
 		cfg.BufferRings[0].Incremental = false
 		l, err = newURingLoop(cfg)
 	}
 	if err != nil && cfg.BufferRings[0].Fixed && !unavailable(err) {
-		// 注册固定缓冲区失败（通常是 RLIMIT_MEMLOCK 不足），退回不注册：SEND_ZC 仍可用，只是逐次 pin 页
+		// Registering fixed buffers failed (usually RLIMIT_MEMLOCK): continue without; SEND_ZC still works but pins pages per send
 		rn.log.Info("uringnet: cannot register receive buffers as fixed buffers (RLIMIT_MEMLOCK?), zero-copy sends will pin pages per send",
 			"ring", rn.index, "err", err)
 		cfg.BufferRings[0].Fixed = false
@@ -462,8 +462,8 @@ func (rn *URingNet) startURing(bufferCount int) error {
 		rn.inc = true
 		rn.incRefs = make([]int32, bufferCount)
 		rn.incDone = make([]bool, bufferCount)
-		// 被引用的缓冲区仍能继续接收（写满前不会挡住接收），上限可以比普通模式宽松得多：
-		// 实测允许占住除 1 个外的全部缓冲区时用户态拷贝最少、吞吐最高
+		// A referenced buffer can still receive (it is not blocked until full), so the limit can be much looser than
+		// in normal mode: allowing all but one buffer to be held gave the fewest copies and highest throughput
 		rn.maxHeld = bufferCount - 1
 	}
 	rn.bundle = !rn.inc && l.Features()&iouring_syscall.IORING_FEAT_RECVSEND_BUNDLE != 0 &&
@@ -472,7 +472,7 @@ func (rn *URingNet) startURing(bufferCount int) error {
 	return nil
 }
 
-// finishStart 是两种后端共同的初始化
+// finishStart is the setup shared by both backends.
 func (rn *URingNet) finishStart() error {
 	rn.conns = make(map[int]*conn)
 	rn.maxWrite = rn.MaxWriteBuffer
@@ -492,10 +492,10 @@ func (rn *URingNet) finishStart() error {
 	return nil
 }
 
-// Connections 返回当前实例上的活跃连接数
+// Connections returns the number of open connections on this ring.
 func (rn *URingNet) Connections() int64 { return rn.connCount.Load() }
 
-// Post 把 fn 投递到该实例的事件循环线程中执行，可在任意 goroutine 中调用
+// Post runs fn on the ring's event loop thread; it is safe to call from any goroutine.
 func (rn *URingNet) Post(fn func()) error {
 	if rn.loop == nil {
 		return errors.ErrRingSetup
@@ -503,9 +503,9 @@ func (rn *URingNet) Post(fn func()) error {
 	return rn.loop.Post(fn)
 }
 
-// ---- Loop 线程 ----
+// ---- loop thread ----
 
-// accept 出错后的退避时间：从 acceptBackoffMin 开始每次翻倍，最多 acceptBackoffMax
+// Backoff after a failed accept: starts at acceptBackoffMin and doubles up to acceptBackoffMax.
 const (
 	acceptBackoffMin = 5 * time.Millisecond
 	acceptBackoffMax = time.Second
@@ -536,14 +536,14 @@ func (rn *URingNet) onAccept(res int32, flags uint32) {
 	if flags&iouring_syscall.IORING_CQE_F_MORE != 0 || rn.stopping || rn.draining {
 		return
 	}
-	// multishot accept 已终止
+	// The multishot accept has ended
 	if res >= 0 {
 		rn.armAccept()
 		return
 	}
 	rn.acceptErrs++
-	// 出错终止（如 EMFILE/ENFILE：fd 用完）。立即重新提交通常会马上再次失败，形成空转，
-	// 所以等一段时间再提交，连续失败时等待时间翻倍；连接仍留在监听队列中，恢复后会被 accept。
+	// It ended with an error (e.g. EMFILE/ENFILE: out of fds). Re-arming at once usually fails again at once and
+	// spins, so wait, doubling the wait on repeated failures; pending connections stay in the backlog until then.
 	if rn.acceptBackoff == 0 {
 		rn.acceptBackoff = acceptBackoffMin
 	} else if rn.acceptBackoff *= 2; rn.acceptBackoff > acceptBackoffMax {
@@ -553,7 +553,7 @@ func (rn *URingNet) onAccept(res int32, flags uint32) {
 	rn.after(rn.acceptBackoff, rn.armAccept)
 }
 
-// openConn 为已连接的 fd（accept 或 connect 得到）创建连接并调用 OnOpen；ctx 在 OnOpen 之前设置
+// openConn creates a connection for a connected fd (accepted or dialed) and calls OnOpen; ctx is set before OnOpen.
 func (rn *URingNet) openConn(fd int, ctx interface{}) *conn {
 	c := newConn(rn, fd)
 	c.api.ctx = ctx
@@ -571,11 +571,11 @@ func (rn *URingNet) openConn(fd int, ctx interface{}) *conn {
 	return c
 }
 
-// shutdownLoop 在 Loop 线程中关闭所有连接
+// shutdownLoop closes all connections; runs on the loop thread.
 func (rn *URingNet) shutdownLoop() {
 	rn.stopping = true
-	// 对监听 socket 执行 shutdown 立即停止监听并使在途 accept 失败。仅 close 不够：
-	// io_uring 中的 multishot accept 持有文件引用，ring 的释放是异步的，端口会短暂保持监听。
+	// shutdown on the listening socket stops listening and fails pending accepts at once. close alone is not enough:
+	// the multishot accept holds a file reference and the ring is released asynchronously, so the port would stay open for a while.
 	if rn.SocketFd >= 0 {
 		unix.Shutdown(rn.SocketFd, unix.SHUT_RD)
 	}
@@ -587,8 +587,8 @@ func (rn *URingNet) shutdownLoop() {
 	}
 }
 
-// drain 开始优雅关闭（Loop 线程）：停止接受新连接，每个连接把已写入的数据发完后关闭。
-// 发送一直没有进展的连接由 WriteTimeout 或最终的 ShutDown 处理。
+// drain starts a graceful shutdown (loop thread): stop accepting and close each connection once it has sent what was
+// written. Connections that make no progress are left to WriteTimeout or the final ShutDown.
 func (rn *URingNet) drain() {
 	if rn.draining || rn.stopping {
 		return
@@ -608,7 +608,7 @@ func (rn *URingNet) drain() {
 	}
 }
 
-// ShutDown 关闭该实例：关闭所有连接、停止事件循环。不能在回调中调用。
+// ShutDown closes this ring: all connections and the event loop. Must not be called from a callback.
 func (rn *URingNet) ShutDown() {
 	rn.shutdownOnce.Do(func() {
 		if rn.loop != nil {
@@ -630,7 +630,7 @@ func (rn *URingNet) ShutDown() {
 	})
 }
 
-// checkKernel 检查内核版本不低于 6.0（multishot recv 与 provided buffer ring）
+// checkKernel checks for Linux 6.0 or later (multishot recv and provided buffer rings).
 func checkKernel() error {
 	var u unix.Utsname
 	if unix.Uname(&u) != nil {
@@ -644,12 +644,12 @@ func checkKernel() error {
 	return nil
 }
 
-// unavailable 判断 io_uring_setup 的错误是否表示 io_uring 不可用（而不是某个功能不支持）
+// unavailable reports whether an io_uring_setup error means io_uring cannot be used at all (rather than a feature being unsupported).
 func unavailable(err error) bool {
 	return stderrors.Is(err, syscall.EPERM) || stderrors.Is(err, syscall.ENOSYS) || stderrors.Is(err, syscall.EACCES)
 }
 
-// setupError 给创建事件循环失败的错误加上原因和解决办法
+// setupError adds the likely cause and a remedy to an event loop setup error.
 func setupError(err error) error {
 	switch {
 	case unavailable(err):

@@ -1,6 +1,6 @@
 //go:build linux
 
-// Package netaddr 把 "host:port" 解析成 IPv4 socket 地址，供直接用 unix.Bind 的压测服务端使用。
+// Package netaddr parses "host:port" into an IPv4 socket address for benchmark servers that call unix.Bind directly.
 package netaddr
 
 import (
@@ -10,7 +10,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// Inet4 解析 "host:port"（host 可为空、0.0.0.0、IP 或主机名）
+// Inet4 parses "host:port" (host may be empty, 0.0.0.0, an IP or a host name).
 func Inet4(addr string) (*unix.SockaddrInet4, error) {
 	ta, err := net.ResolveTCPAddr("tcp4", addr)
 	if err != nil {

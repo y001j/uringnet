@@ -22,7 +22,7 @@ func TestLengthFieldFramer(t *testing.T) {
 	for _, size := range []int{1, 2, 4, 8} {
 		for _, order := range []binary.ByteOrder{binary.BigEndian, binary.LittleEndian} {
 			f := NewLengthField(size, order, 200)
-			frame := f.AppendFrame([]byte("x"), []byte("hello"))[1:] // 追加到已有数据之后
+			frame := f.AppendFrame([]byte("x"), []byte("hello"))[1:] // appended after existing data
 			if n, err := f.Frame(frame); n != size+5 || err != nil {
 				t.Fatalf("size %d %v: Frame = %d, %v", size, order, n, err)
 			}
@@ -58,7 +58,7 @@ func TestDelimiterFramer(t *testing.T) {
 		{"abc\r\n", 5, false},
 		{"\r\nabc", 2, false},
 		{"abcdefgh\r\n", 10, false},
-		{"abcdefghi\r\n", 0, true}, // 分隔符不在前 10 字节内
+		{"abcdefghi\r\n", 0, true}, // no delimiter within the first 10 bytes
 		{"abcdefghij", 0, true},
 	} {
 		n, err := d.Frame([]byte(tc.in))
@@ -84,7 +84,7 @@ func TestFixedLengthFramer(t *testing.T) {
 	}
 }
 
-// frameEcho 把每一帧原样写回，并统计收到的帧
+// frameEcho writes every frame back and counts the frames.
 type frameEcho struct {
 	BuiltinHandler
 	frames atomic.Int64
@@ -104,7 +104,7 @@ func (h *frameEcho) OnClose(c *Conn, err error) {
 	h.mu.Unlock()
 }
 
-// 长度前缀帧在随机分包下：帧数与内容都正确（帧完整到达时原地写回，跨包时从缓存写回）
+// Length-prefixed frames under random chunking: frame count and contents are right (in place for whole frames, from the buffer for split ones).
 func TestFramedLengthField(t *testing.T) {
 	lf := NewLengthField(2, binary.BigEndian, 4096)
 	h := &frameEcho{}
@@ -126,7 +126,7 @@ func TestFramedLengthField(t *testing.T) {
 	}
 }
 
-// 按行处理的协议：每行转成大写回复；超长的行关闭连接
+// A line protocol: each line is answered in upper case; an overlong line closes the connection.
 type upperLines struct {
 	BuiltinHandler
 	d    *Delimiter
@@ -155,7 +155,7 @@ func TestFramedDelimiter(t *testing.T) {
 	}
 	defer c.Close()
 	c.SetDeadline(time.Now().Add(5 * time.Second))
-	// 一次写入多行，并把一行拆成两次写入
+	// Several lines in one write, and one line split over two writes
 	c.Write([]byte("hello\nworld\nsp"))
 	time.Sleep(20 * time.Millisecond)
 	c.Write([]byte("lit\nquit\nignored\n"))

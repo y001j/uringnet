@@ -13,16 +13,16 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// seg 是发送队列中的一段数据
+// seg is one piece of data in a send queue.
 type seg struct {
 	b       []byte
-	bid     int32  // >= 0：b 位于该 provided buffer 中，发送完后归还
-	release func() // 非 nil：b 由用户提供（WriteNoCopy），内核用完后调用
-	copied  bool   // b 是框架的拷贝缓冲区（可以追加、发送完后复用）
-	zc      *zcRef // 非 nil：使用 SEND_ZC 发送
+	bid     int32  // >= 0: b lies in this receive buffer, returned after the send
+	release func() // non-nil: b belongs to the user (WriteNoCopy); called once the kernel is done with it
+	copied  bool   // b is the package's own copy buffer (may be appended to, reused after the send)
+	zc      *zcRef // non-nil: sent with SEND_ZC
 }
 
-// zcRef 跟踪一段零拷贝数据的在途通知：段发送完毕（done）且所有通知 CQE 到达（n == 0）后才能释放
+// zcRef tracks the notifications of a zero-copy segment: it can be released once sent (done) and all notification CQEs arrived (n == 0).
 type zcRef struct {
 	n       int
 	done    bool
@@ -30,55 +30,55 @@ type zcRef struct {
 	release func()
 }
 
-// conn 是一个 TCP 连接的状态机，只在所属 URingNet 的 Loop 线程中访问。
+// conn is the state machine of one stream connection, accessed only on its ring's loop thread.
 //
-//   - 读：一个 multishot recv 持续接收，数据落在 provided buffer ring 中；内核支持时使用
-//     recv bundle，一个完成事件可携带多个缓冲区，逐个交给 OnTraffic。
-//   - 写：发送队列按段组织，同一时刻最多一个 send 在途，保证字节流顺序；处理短写。
-//     一次回调（bundle 时为一个完成事件中的全部缓冲区）产生的数据在回调结束后一并发送，
-//     队列中的多段用一次 sendmsg 聚集发送（最多 maxIov 段）；拷贝的小数据合并到同一段中。
-//   - 原地发送：WriteBuf 指向本次接收缓冲区（如 echo）且发送队列为空时，直接发送该缓冲区，发送完再归还。
-//   - 零拷贝：开启 ZeroCopyThreshold 后，原地发送与 WriteNoCopy 的大段数据使用 SEND_ZC，
-//     buffer ring 注册为固定缓冲区时使用 SendZCFixed；内存在通知 CQE 到达后才释放。
-//   - 关闭：shutdown(fd) 使在途 recv 以 EOF 结束、在途 send 出错结束，
-//     等 recv/send 都结束后才 close(fd)，避免 fd 被复用后串到新连接上。
+//   - Receive: one multishot recv keeps receiving into the provided buffer ring; with recv bundles a
+//     completion can carry several buffers, each passed to OnTraffic.
+//   - Send: the queue is made of segments with at most one send in flight, which keeps the stream in
+//     order; short writes are handled. Data written during a callback (all buffers of a bundle) is sent
+//     together after it, up to maxIov segments per sendmsg; small copied writes are merged into one segment.
+//   - In-place send: data that lies in the current receive buffer (echo) is sent from it when the queue is empty, and the buffer returned afterwards.
+//   - Zero copy: with ZeroCopyThreshold, large in-place sends and WriteNoCopy data use SEND_ZC
+//     (SendZCFixed when the buffers are registered); the memory is released after the notification CQE.
+//   - Close: shutdown(fd) ends the pending recv with EOF and the pending send with an error; the fd is
+//     closed only after both have ended, so a reused fd number cannot get mixed up with a new connection.
 type conn struct {
 	ud UserData
 	rn *URingNet
 	fd int
 
 	recvActive bool
-	recvUD     uint64 // 在途 multishot recv 的 user_data（暂停接收时用于取消）
-	paused     bool   // 发送队列超过 MaxWriteBuffer，暂停接收
-	qBytes     int    // 发送队列中待发送的字节数
-	lastActive uint64 // 最近一次收到或发出数据时的节拍号（IdleTimeout）
-	lastSend   uint64 // 最近一次发送进展（或队列由空变为非空）时的节拍号（WriteTimeout）
+	recvUD     uint64 // user_data of the multishot recv (to cancel it when pausing)
+	paused     bool   // receiving paused: send queue above MaxWriteBuffer
+	qBytes     int    // bytes queued and not yet sent
+	lastActive uint64 // tick of the last data received or sent (IdleTimeout)
+	lastSend   uint64 // tick of the last send progress, or when the queue became non-empty (WriteTimeout)
 	sending    bool
 	q          []seg
-	qBase      []seg // q 的底层数组起点，队列清空后复用，避免每次入队都分配
-	off        int   // 队首段已发送的字节数
-	inflight   int   // 在途 send 覆盖的队首段数
+	qBase      []seg // start of q's backing array, reused once the queue empties to avoid allocating per enqueue
+	off        int   // bytes of the head segment already sent
+	inflight   int   // head segments covered by the send in flight
 	iov        [maxIov]unix.Iovec
 	msg        unix.Msghdr
-	spare      [][]byte // 复用的拷贝缓冲区
-	closeAfter bool     // 发送完成后关闭（EchoAndClose、Conn.Close）
-	batching   bool     // 正在执行回调：入队的数据暂不发送，回调结束后由 flush 一并发出
-	closed     bool     // 已 shutdown，等待在途请求结束
+	spare      [][]byte // reusable copy buffers
+	closeAfter bool     // close once the queue is sent (EchoAndClose, Conn.Close)
+	batching   bool     // inside a callback: queued data is sent by flush after it returns
+	closed     bool     // shut down, waiting for pending requests to end
 	freed      bool
-	err        error // 关闭原因，交给 OnClose
+	err        error // reason for closing, passed to OnClose
 
-	// 当前 OnTraffic 中的接收缓冲区：写入的数据位于其中时可以原地发送（curBid < 0 表示不在 OnTraffic 中）
+	// Receive buffer of the current OnTraffic call: data written from it can be sent in place (curBid < 0: not in OnTraffic)
 	curBuf  []byte
 	curBid  int32
-	curHeld bool // 当前接收缓冲区被发送队列占用，回调结束后不能归还
+	curHeld bool // the current receive buffer is held by the send queue and must not be returned after the callback
 
-	api Conn // 新 API 中交给回调的连接对象
+	api Conn // the connection object passed to Handler callbacks
 
 	onRecvH iouring.Handler
 	onSendH iouring.Handler
 }
 
-// maxIov 为一次聚集发送的最大段数
+// maxIov is the maximum number of segments in one gather send.
 const maxIov = 16
 
 func newConn(rn *URingNet, fd int) *conn {
@@ -86,7 +86,7 @@ func newConn(rn *URingNet, fd int) *conn {
 	c.ud.Fd = int32(fd)
 	c.ud.c = c
 	c.api.c = c
-	// 缓存方法值，避免每次提交请求都分配闭包
+	// Cache the method values so submitting a request does not allocate a closure
 	c.onRecvH = c.onRecv
 	c.onSendH = c.onSend
 	return c
@@ -97,8 +97,8 @@ func (c *conn) armRecv() {
 	c.recvUD = c.rn.loop.RecvMultishot(c.fd, c.rn.bundle, c.onRecvH)
 }
 
-// checkBackpressure 在回调结束后检查发送队列：超过上限时暂停接收（取消 multishot recv）。
-// 取消完成前已经收到的数据仍会交给 OnTraffic。
+// checkBackpressure runs after a callback: above the queue limit, receiving pauses (the multishot recv is cancelled).
+// Data received before the cancellation completes is still passed to OnTraffic.
 func (c *conn) checkBackpressure() {
 	max := c.rn.maxWrite
 	if max <= 0 || c.paused || c.closed || c.qBytes <= max {
@@ -111,7 +111,7 @@ func (c *conn) checkBackpressure() {
 	}
 }
 
-// maybeResume 在发送取得进展后调用：队列降到上限的一半以下时恢复接收
+// maybeResume runs after send progress: receiving resumes once the queue is below half the limit.
 func (c *conn) maybeResume() {
 	if !c.paused || c.qBytes > c.rn.maxWrite/2 {
 		return
@@ -130,14 +130,14 @@ func (c *conn) onRecv(res int32, flags uint32) {
 	}
 	c.batching = true
 	if rn.bundle {
-		// 一个 CQE 可能连续使用多个缓冲区，逐个交给 OnTraffic
+		// One CQE may span several consecutive buffers; pass each to OnTraffic
 		bufs := rn.br.Bundle(res, flags, rn.bundleBufs[:0])
 		rn.bundleBufs = bufs[:0]
 		for _, b := range bufs {
 			c.deliver(b.Bid, b.Data)
 		}
 	} else if rn.inc {
-		// 增量消费：数据位于大缓冲区中上一次数据之后；内核用完且没有片段被引用时才归还
+		// Incremental: the data follows the previous data in a large buffer, which goes back once the kernel is done with it and no slice is referenced
 		if bid, data, more, ok := rn.br.GetIncremental(res, flags); ok {
 			if !more {
 				rn.incDone[bid] = true
@@ -155,20 +155,20 @@ func (c *conn) onRecv(res int32, flags uint32) {
 		return
 	}
 
-	// multishot recv 已终止
+	// The multishot recv has ended
 	c.recvActive = false
 	switch {
 	case c.closed:
 		c.maybeFree()
 	case c.paused && (res > 0 || res == -int32(syscall.ECANCELED) || res == -int32(syscall.ENOBUFS)):
-		// 背压暂停中：发送队列降下来后由 maybeResume 重新提交
+		// Paused by backpressure: maybeResume re-arms once the queue drains
 	case res == -int32(syscall.ECANCELED):
-		// 为暂停而取消，但取消完成前暂停已经解除
+		// Cancelled to pause, but the pause ended before the cancellation completed
 		c.armRecv()
 	case res == -int32(syscall.ENOBUFS):
 		rn.enobufs++
-		// 缓冲区暂时耗尽。若有缓冲区被在途 send 占用，等它归还后再重新提交；
-		// 否则所有已处理的缓冲区都已归还，下一次 io_uring_enter 会先发布再提交，可立即重试。
+		// Out of buffers. If some are held by sends in flight, re-arm once one comes back; otherwise all
+		// processed buffers have already been returned and are published before the next submission, so retry now.
 		if rn.held > 0 {
 			rn.starved = append(rn.starved, c)
 		} else {
@@ -177,8 +177,8 @@ func (c *conn) onRecv(res int32, flags uint32) {
 	case res > 0:
 		c.armRecv()
 	case res == 0:
-		// 对端关闭了写方向（可能只是半关闭，仍在等回复）：不再接收，把已写入的数据发完再关闭；
-		// 对端已完全关闭时发送会失败，连接随之关闭
+		// The peer shut down its write side (perhaps only half-closed, still waiting for a reply): stop receiving,
+		// send what was written, then close; if the peer is fully gone the send fails and the connection closes
 		if c.err == nil {
 			c.err = io.EOF
 		}
@@ -188,7 +188,7 @@ func (c *conn) onRecv(res int32, flags uint32) {
 	}
 }
 
-// deliver 把一个接收缓冲区中的数据交给 OnTraffic，没有被发送队列占用时立即归还
+// deliver passes one receive buffer to OnTraffic and returns it at once unless the send queue holds it.
 func (c *conn) deliver(bid uint16, data []byte) {
 	held := c.traffic(bid, data)
 	if !held {
@@ -196,13 +196,13 @@ func (c *conn) deliver(bid uint16, data []byte) {
 	}
 }
 
-// deliverInc 是增量消费模式下的 deliver：原地发送的片段在 writeFrom 中给缓冲区加引用，
-// 缓冲区由调用方在内核用完且没有引用时归还
+// deliverInc is deliver for incremental buffers: in-place sends take references in writeFrom, and the caller
+// returns the buffer once the kernel is done with it and nothing references it.
 func (c *conn) deliverInc(bid uint16, data []byte) {
 	c.traffic(bid, data)
 }
 
-// traffic 调用 OnTraffic，返回接收缓冲区是否被发送队列占用
+// traffic calls OnTraffic and reports whether the receive buffer is now held by the send queue.
 func (c *conn) traffic(bid uint16, data []byte) (held bool) {
 	if len(data) == 0 || c.closed {
 		return false
@@ -214,14 +214,14 @@ func (c *conn) traffic(bid uint16, data []byte) (held bool) {
 	return held
 }
 
-// send 发送 b：在 OnTraffic 中且 b 位于本次接收缓冲区时尽量原地发送，否则拷贝
+// send queues b, in place when it lies in the current receive buffer (during OnTraffic), otherwise copied.
 func (c *conn) send(b []byte) {
 	if c.writeFrom(b, c.curBuf, c.curBid) {
 		c.curHeld = true
 	}
 }
 
-// closeAfterFlush 在发送队列清空后关闭连接；队列已空时立即关闭
+// closeAfterFlush closes the connection once the send queue is empty, at once if it already is.
 func (c *conn) closeAfterFlush() {
 	c.closeAfter = true
 	if !c.sending && len(c.q) == 0 {
@@ -229,11 +229,11 @@ func (c *conn) closeAfterFlush() {
 	}
 }
 
-// writeFrom 发送 b：发送队列为空且 b 位于本次接收缓冲区时原地发送（返回 true），否则拷贝。
-// 只在队列为空时原地发送：允许一个连接同时占用多个接收缓冲区会加剧缓冲区耗尽（-ENOBUFS
-// 后需重新提交 recv），实测得不偿失。
-// 原地发送会占用接收缓冲区直到发送完成；被占用的缓冲区超过 maxHeld 时改为拷贝，
-// 避免缓冲区耗尽：耗尽时 multishot recv 以 -ENOBUFS 终止，重新提交的开销远大于一次拷贝。
+// writeFrom queues b: in place (returns true) when the queue is empty and b lies in the current receive buffer,
+// otherwise copied. Only with an empty queue: letting one connection hold several receive buffers makes running
+// out of buffers (and re-arming recv after -ENOBUFS) more likely, which measured as a net loss.
+// An in-place send holds the receive buffer until it completes; above maxHeld held buffers it copies instead,
+// because running out ends the multishot recv with -ENOBUFS and re-arming costs far more than one copy.
 func (c *conn) writeFrom(b, recvBuf []byte, bid int32) bool {
 	if len(b) == 0 || c.closed {
 		return false
@@ -242,7 +242,7 @@ func (c *conn) writeFrom(b, recvBuf []byte, bid int32) bool {
 		rn := c.rn
 		rn.held++
 		if rn.inc {
-			// 每个原地发送的片段给缓冲区加一个引用，releaseBuf 中逐个释放
+			// Each slice sent in place takes a reference on its buffer, released one by one in releaseBuf
 			if rn.incRefs[bid] == 0 {
 				rn.incPinned++
 			}
@@ -255,10 +255,10 @@ func (c *conn) writeFrom(b, recvBuf []byte, bid int32) bool {
 	return false
 }
 
-// canHold 判断能否原地发送 bid 中的数据。
-// 普通模式：只在发送队列为空时，且被占用的缓冲区少于 maxHeld。
-// 增量消费模式：数据只占大缓冲区的一小段，允许一个连接原地发送多段；限制的是被引用的缓冲区数量
-// （同一缓冲区中再多引用一段不会多占缓冲区）。
+// canHold reports whether data in buffer bid can be sent in place.
+// Normal mode: only with an empty send queue and fewer than maxHeld buffers held.
+// Incremental mode: data takes only part of a large buffer, so a connection may send several slices in place;
+// the limit is on referenced buffers (another slice of an already referenced buffer costs nothing).
 func (c *conn) canHold(bid uint16) bool {
 	rn := c.rn
 	if rn.inc {
@@ -267,7 +267,7 @@ func (c *conn) canHold(bid uint16) bool {
 	return len(c.q) == 0 && rn.held < rn.maxHeld
 }
 
-// write 把 b 拷贝进发送队列：尽量追加到队尾的拷贝段（在途 send 覆盖的段不能追加）
+// write copies b into the send queue, appending to the last copied segment when possible (not to segments covered by the send in flight).
 func (c *conn) write(b []byte) {
 	if len(b) == 0 || c.closed {
 		return
@@ -288,7 +288,7 @@ func (c *conn) write(b []byte) {
 	c.enqueue(seg{b: append(buf, b...), bid: -1, copied: true})
 }
 
-// writeNoCopy 把用户的 b 原样加入发送队列，内核用完后调用 release
+// writeNoCopy queues the user's b as is; release is called once the kernel is done with it.
 func (c *conn) writeNoCopy(b []byte, release func()) error {
 	if c.closed {
 		if release != nil {
@@ -315,12 +315,12 @@ func (c *conn) enqueue(s seg) {
 		c.q = c.qBase[:0]
 	}
 	if len(c.q) == 0 {
-		c.lastSend = rn.tick // 从这时起开始计算 WriteTimeout
+		c.lastSend = rn.tick // WriteTimeout counts from here
 	}
 	c.q = append(c.q, s)
 	c.qBytes += len(s.b)
 	if len(c.q) == 1 {
-		c.qBase = c.q // 从空队列开始时 q 位于底层数组起点
+		c.qBase = c.q // starting from an empty queue, q begins at the start of its backing array
 	}
 	if !c.sending && !c.batching {
 		c.off = 0
@@ -328,7 +328,7 @@ func (c *conn) enqueue(s seg) {
 	}
 }
 
-// flush 在回调结束后发送回调期间入队的数据
+// flush sends the data queued during a callback.
 func (c *conn) flush() {
 	if !c.sending && len(c.q) > 0 && !c.closed {
 		c.off = 0
@@ -352,7 +352,7 @@ func (c *conn) sendHead() {
 		c.inflight = 1
 		return
 	}
-	// 聚集发送：从队首起连续的非零拷贝段，最多 maxIov 段
+	// Gather send: consecutive non-zero-copy segments from the head, at most maxIov
 	n := 0
 	for i := range c.q {
 		if n == maxIov || (i > 0 && c.q[i].zc != nil && rn.zcEnabled()) {
@@ -377,7 +377,7 @@ func (c *conn) sendHead() {
 	rn.gatherSends++
 }
 
-// zcHandler 处理 SEND_ZC 的结果 CQE 与通知 CQE
+// zcHandler handles the result CQE and the notification CQE of a SEND_ZC.
 func (c *conn) zcHandler(ref *zcRef) iouring.Handler {
 	return func(res int32, flags uint32) {
 		if flags&iouring_syscall.IORING_CQE_F_NOTIF != 0 {
@@ -386,11 +386,11 @@ func (c *conn) zcHandler(ref *zcRef) iouring.Handler {
 			return
 		}
 		if flags&iouring_syscall.IORING_CQE_F_MORE == 0 {
-			ref.n-- // 不会有通知 CQE
+			ref.n-- // no notification CQE will follow
 		}
 		if res == -int32(syscall.EOPNOTSUPP) || res == -int32(syscall.EINVAL) || res == -int32(syscall.ENOMEM) {
-			// 内核或 socket 不支持零拷贝（EOPNOTSUPP/EINVAL），或 pin 页超出 RLIMIT_MEMLOCK（ENOMEM）：
-			// 这些条件不会很快改变，关闭本实例的零拷贝，用普通 send 重发
+			// The kernel or socket cannot do zero copy (EOPNOTSUPP/EINVAL), or pinning exceeds RLIMIT_MEMLOCK (ENOMEM):
+			// that will not change soon, so turn zero copy off for this ring and resend normally
 			c.rn.zcOff = true
 			c.rn.log.Warn("uringnet: zero-copy send unavailable, falling back to normal sends", "ring", c.rn.index, "err", syscall.Errno(-res))
 			c.sending = false
@@ -406,7 +406,7 @@ func (c *conn) zcHandler(ref *zcRef) iouring.Handler {
 func (c *conn) onSend(res int32, flags uint32) {
 	c.inflight = 0
 	if res <= 0 || c.closed {
-		// 出错（含 shutdown 后的 -EPIPE / -ECANCELED）
+		// Error (including -EPIPE / -ECANCELED after shutdown)
 		c.sending = false
 		if res < 0 {
 			c.fail(syscall.Errno(-res))
@@ -418,7 +418,7 @@ func (c *conn) onSend(res int32, flags uint32) {
 	c.qBytes -= int(res)
 	c.rn.bytesOut += uint64(res)
 	c.lastActive, c.lastSend = c.rn.tick, c.rn.tick
-	// 按发送的字节数依次移除已发完的段；短写时停在未发完的段上
+	// Drop the segments covered by the bytes sent; a short write stops in the middle of a segment
 	for remain := int(res); remain > 0; {
 		left := len(c.q[0].b) - c.off
 		if remain < left {
@@ -442,7 +442,7 @@ func (c *conn) onSend(res int32, flags uint32) {
 	}
 }
 
-// popHead 移除已发送完的队首段并释放其内存
+// popHead removes the fully sent head segment and releases its memory.
 func (c *conn) popHead() {
 	s := c.q[0]
 	c.q[0] = seg{}
@@ -450,7 +450,7 @@ func (c *conn) popHead() {
 	c.finish(s)
 }
 
-// finish 释放一段数据；零拷贝段要等所有通知 CQE 到达
+// finish releases a segment; zero-copy segments wait for all their notification CQEs.
 func (c *conn) finish(s seg) {
 	switch {
 	case s.zc != nil:
@@ -465,7 +465,7 @@ func (c *conn) finish(s seg) {
 	}
 }
 
-// fail 以 err 为原因关闭连接（交给 OnClose）；连接已经在关闭时保留原来的原因
+// fail closes the connection with err as the reason passed to OnClose; an earlier reason is kept.
 func (c *conn) fail(err error) {
 	if !c.closed && c.err == nil {
 		c.err = err
@@ -473,8 +473,8 @@ func (c *conn) fail(err error) {
 	c.close()
 }
 
-// close 关闭连接：shutdown 让在途请求尽快结束，fd 在 maybeFree 中关闭。
-// 可重复调用：已关闭时仍会尝试释放（在途请求结束的路径会再次调用它）。
+// close shuts the connection down so pending requests end soon; maybeFree closes the fd.
+// It may be called repeatedly: the paths where pending requests end call it again to free the connection.
 func (c *conn) close() {
 	if !c.closed {
 		c.closed = true
@@ -490,8 +490,8 @@ func (c *conn) maybeFree() {
 	c.free()
 }
 
-// free 释放连接；正常路径只在没有在途 recv/send 时调用，Shutdown 时强制调用。
-// 零拷贝段的内存仍会等通知 CQE 到达后释放（通知不依赖 fd）。
+// free releases the connection. Normally called once no recv/send is pending; forced on Shutdown.
+// Zero-copy memory is still released only after the notification CQEs (which do not depend on the fd).
 func (c *conn) free() {
 	if c.freed {
 		return
@@ -510,7 +510,7 @@ func (c *conn) free() {
 	c.spare = nil
 }
 
-// ---- URingNet 侧的缓冲区管理（Loop 线程）----
+// ---- receive buffer management (loop thread) ----
 
 func (rn *URingNet) zcEnabled() bool { return rn.ZeroCopyThreshold > 0 && !rn.zcOff }
 
@@ -521,7 +521,7 @@ func (rn *URingNet) maybeReleaseZC(ref *zcRef) {
 	}
 }
 
-// releaseBuf 归还被发送占用的接收缓冲区，或通知用户缓冲区可复用
+// releaseBuf returns a receive buffer held by a send, or tells the user their buffer is free.
 func (rn *URingNet) releaseBuf(bid int32, release func()) {
 	if bid >= 0 {
 		rn.held--
@@ -531,8 +531,8 @@ func (rn *URingNet) releaseBuf(bid int32, release func()) {
 				rn.incPinned--
 				rn.maybeRecycleInc(b)
 			}
-			// 引用归零时缓冲区可能尚未被内核用完（不会归还、也就不会唤醒等待的连接）；
-			// 没有任何片段被占用时，ring 中必然有可用空间，唤醒全部等待的连接，否则它们会永远等下去
+			// A buffer whose references dropped to zero may not be finished by the kernel yet (so it is not returned and wakes nobody);
+			// when no slice is held at all the ring must have room, so wake every waiting connection or they could wait forever
 			if rn.held == 0 {
 				rn.rearmStarved(true)
 			}
@@ -546,20 +546,20 @@ func (rn *URingNet) releaseBuf(bid int32, release func()) {
 	}
 }
 
-// maybeRecycleInc 在内核已用完且没有片段引用时归还增量消费模式的缓冲区
+// maybeRecycleInc returns an incremental buffer once the kernel is done with it and no slice is referenced.
 func (rn *URingNet) maybeRecycleInc(bid uint16) {
 	if rn.incDone[bid] && rn.incRefs[bid] == 0 {
 		rn.incDone[bid] = false
 		rn.br.Recycle(bid)
-		// 一个大缓冲区能容纳许多连接的数据：唤醒全部等待的连接
+		// One large buffer holds data for many connections: wake all waiting connections
 		rn.rearmStarved(true)
 	}
 }
 
-// rearmStarved 有缓冲区归还时，为因 -ENOBUFS 停止接收的连接重新提交 recv。
-// 每归还一个缓冲区只唤醒一个连接（先进先出）：一次全部唤醒时只有少数能拿到缓冲区，
-// 其余会立刻再次 -ENOBUFS（惊群）。all 为 true（已没有被占用的缓冲区）时唤醒全部，
-// 否则剩下的连接可能再也等不到归还。
+// rearmStarved re-arms recv for connections stopped by -ENOBUFS when buffers come back.
+// One connection per returned buffer, first in first out: waking all at once lets only a few get a buffer and
+// the rest hit -ENOBUFS again (thundering herd). With all (no buffer held any more) it wakes all of them, or
+// the remaining ones might never see another buffer returned.
 func (rn *URingNet) rearmStarved(all bool) {
 	for len(rn.starved) > 0 {
 		c := rn.starved[0]
@@ -582,7 +582,7 @@ func sliceStart(b []byte) uintptr {
 	return uintptr(unsafe.Pointer(unsafe.SliceData(b[:1])))
 }
 
-// overlaps 判断 a 与 b 的底层数组（按容量计算）是否有重叠
+// overlaps reports whether the backing arrays of a and b (by capacity) overlap.
 func overlaps(a, b []byte) bool {
 	if cap(a) == 0 || cap(b) == 0 {
 		return false
@@ -591,7 +591,7 @@ func overlaps(a, b []byte) bool {
 	return a0 < b0+uintptr(cap(b)) && b0 < a0+uintptr(cap(a))
 }
 
-// within 判断 a 的数据是否完全位于 b 的底层数组（按容量计算）内
+// within reports whether a's data lies entirely within b's backing array (by capacity).
 func within(a, b []byte) bool {
 	if len(a) == 0 || cap(b) == 0 {
 		return false

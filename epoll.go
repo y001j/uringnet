@@ -33,10 +33,10 @@ type epollLoop struct {
 	stopping atomic.Bool
 	done     chan struct{}
 
-	// 以下字段只在循环线程中访问
+	// The fields below are only accessed on the loop thread.
 	nextUD uint64
 	fds    map[int]*epFD
-	ops    map[uint64]*epOp // 可取消的操作：accept、recv、connect
+	ops    map[uint64]*epOp // cancellable operations: accept, recv, connect
 	ready  []completion
 	timers timerHeap
 }
@@ -61,15 +61,15 @@ type epOp struct {
 	h    handler
 }
 
-// epFD 是一个 fd 上进行中的操作
+// epFD holds the operations pending on one fd.
 type epFD struct {
 	fd         int
-	registered uint32 // 当前注册的 epoll 事件，0 表示未注册
+	registered uint32 // epoll events currently registered, 0 if none
 	accept     *epOp
-	recv       *epOp // 流式 recv 或 recvmsg
+	recv       *epOp // stream recv or recvmsg
 	nameLen    uint32
 	connect    *epOp
-	sends      []epSend // 因 EAGAIN 等待 EPOLLOUT 的发送，按顺序
+	sends      []epSend // sends waiting for EPOLLOUT after EAGAIN, in order
 }
 
 type epSend struct {
@@ -184,7 +184,7 @@ func (l *epollLoop) runPosted() {
 	l.spare = fns
 }
 
-// deliver 执行排队的完成回调；回调中提交的操作产生的新完成也在这里一并执行
+// deliver runs the queued completions, including those produced by operations the completions submit.
 func (l *epollLoop) deliver() {
 	for len(l.ready) > 0 {
 		batch := l.ready
@@ -215,7 +215,7 @@ func (l *epollLoop) newOp(fd, kind int, h handler) *epOp {
 
 func (l *epollLoop) endOp(op *epOp) { delete(l.ops, op.ud) }
 
-// fdState 返回 fd 的状态，第一次使用时把 fd 设为非阻塞
+// fdState returns the state of fd, making the fd non-blocking on first use.
 func (l *epollLoop) fdState(fd int) *epFD {
 	st := l.fds[fd]
 	if st == nil {
@@ -226,7 +226,7 @@ func (l *epollLoop) fdState(fd int) *epFD {
 	return st
 }
 
-// update 按 fd 上进行中的操作调整 epoll 注册；没有操作时注销并忘掉这个 fd
+// update adjusts the epoll registration to the pending operations; with none it unregisters and forgets the fd.
 func (l *epollLoop) update(st *epFD) {
 	var want uint32
 	if st.accept != nil || st.recv != nil {
@@ -298,7 +298,7 @@ func (l *epollLoop) doAccept(st *epFD) {
 			}
 			continue
 		}
-		// 与 io_uring 一样，出错时 multishot accept 终止，由调用方决定何时重新提交
+		// As with io_uring, an error ends the multishot accept and the caller decides when to re-arm
 		st.accept = nil
 		l.endOp(op)
 		l.complete(op.h, errnoRes(err), 0)
@@ -315,7 +315,7 @@ func (l *epollLoop) RecvMultishot(fd int, _ bool, h handler) uint64 {
 	return st.recv.ud
 }
 
-// endRecv 终止 multishot recv，以 res 完成（不带 MORE）
+// endRecv ends the multishot recv, completing with res (without MORE).
 func (l *epollLoop) endRecv(st *epFD, res int32) {
 	op := st.recv
 	st.recv = nil
@@ -353,8 +353,8 @@ func (l *epollLoop) doRecv(st *epFD) {
 		default:
 			l.complete(op.h, int32(n), bufFlags(bid))
 			if n < len(buf) {
-				// 没读满：socket 多半已经读空。不再试读（那只会多一次返回 EAGAIN 的系统调用），
-				// 水平触发的 epoll 会在还有数据时再次通知
+				// Short read: the socket is most likely drained. Do not try again (that only costs a read returning
+				// EAGAIN); level-triggered epoll reports the fd again if more data arrives
 				return
 			}
 		}
@@ -369,8 +369,8 @@ func (l *epollLoop) RecvMsgMultishot(fd int, msg *unix.Msghdr, h handler) uint64
 	return st.recv.ud
 }
 
-// doRecvMsg 收数据报，并按 io_uring multishot recvmsg 的格式写入缓冲区：
-// io_uring_recvmsg_out（16 字节）、地址（nameLen 字节）、数据
+// doRecvMsg receives datagrams and lays them out in the buffer like io_uring's multishot recvmsg:
+// io_uring_recvmsg_out (16 bytes), the address (nameLen bytes), then the payload.
 func (l *epollLoop) doRecvMsg(st *epFD) {
 	op := st.recv
 	nameLen := st.nameLen
@@ -406,7 +406,7 @@ func (l *epollLoop) doRecvMsg(st *epFD) {
 		}
 		binary.NativeEndian.PutUint32(buf[0:], msg.Namelen)
 		binary.NativeEndian.PutUint32(buf[4:], 0)
-		binary.NativeEndian.PutUint32(buf[8:], uint32(n)) // MSG_TRUNC：数据报的实际长度
+		binary.NativeEndian.PutUint32(buf[8:], uint32(n)) // with MSG_TRUNC: the datagram's real length
 		binary.NativeEndian.PutUint32(buf[12:], uint32(msg.Flags))
 		got := int(n)
 		if got > len(buf)-off {
@@ -426,7 +426,7 @@ func (l *epollLoop) Sendmsg(fd int, msg *unix.Msghdr, keep []byte, h handler) ui
 	return l.submitSend(fd, epSend{msg: msg, keep: keep, h: h})
 }
 
-// SendZC 在 epoll 下退化为普通发送（启用 epoll 时零拷贝已关闭，这里只是兜底）
+// SendZC is a normal send on epoll (zero copy is turned off with epoll; this is only a safety net).
 func (l *epollLoop) SendZC(fd int, b []byte, _ int, h handler) uint64 {
 	return l.Send(fd, b, h)
 }
@@ -438,7 +438,7 @@ func (l *epollLoop) submitSend(fd int, s epSend) uint64 {
 		if res, again := trySend(fd, s); !again {
 			l.complete(s.h, res, 0)
 			if st.accept == nil && st.recv == nil && st.connect == nil {
-				l.update(st) // 没有其他操作时忘掉这个 fd
+				l.update(st) // forget the fd if nothing else is pending on it
 			}
 			return l.nextUD
 		}
@@ -448,7 +448,7 @@ func (l *epollLoop) submitSend(fd int, s epSend) uint64 {
 	return l.nextUD
 }
 
-// trySend 发送一次；again 为 true 表示 socket 缓冲区已满，需要等 EPOLLOUT
+// trySend sends once; again means the socket buffer is full and the send must wait for EPOLLOUT.
 func trySend(fd int, s epSend) (res int32, again bool) {
 	for {
 		var n uintptr
@@ -534,7 +534,7 @@ func (l *epollLoop) finishConnect(st *epFD) {
 func (l *epollLoop) Cancel(ud uint64) {
 	op := l.ops[ud]
 	if op == nil {
-		return // 已经完成
+		return // already completed
 	}
 	st := l.fds[op.fd]
 	l.endOp(op)
@@ -589,8 +589,8 @@ func (l *epollLoop) fireTimers() {
 
 // ---- buffer pool ----
 
-// epollBufRing 模拟 provided buffer ring：空闲缓冲区是一个栈（后进先出），
-// 最近归还的缓冲区最先被复用，拷贝时更可能还在 CPU 缓存里
+// epollBufRing emulates a provided buffer ring. Free buffers form a stack (last in, first out), so the
+// most recently returned buffer is reused first and is more likely to still be in the CPU cache.
 type epollBufRing struct {
 	size int
 	mem  []byte

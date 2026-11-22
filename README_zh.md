@@ -159,6 +159,8 @@ func main() {
 
 旧的 API（`NewMany`、`SetLoops`、`EventHandler`、`UserData`）仍然可用，但已标记为弃用。
 
+内部实现（线程模型、收发路径、缓冲区生命周期、连接关闭、epoll 后端）见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)（英文）。
+
 ### 拨出连接
 
 `Server.Dial(ctx, network, address, connCtx)` 从服务的某个事件循环发起连接（使用 `IORING_OP_CONNECT`），在 `OnOpen`

@@ -171,6 +171,9 @@ Callback semantics:
 
 The earlier API (`NewMany`, `SetLoops`, `EventHandler`, `UserData`) still works but is deprecated.
 
+How it works inside (threading, receive and send paths, buffer lifecycle, closing, the epoll backend) is described in
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
 ### Outgoing connections
 
 `Server.Dial(ctx, network, address, connCtx)` connects from one of the server's event loops (with `IORING_OP_CONNECT`)

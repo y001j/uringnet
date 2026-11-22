@@ -1,13 +1,13 @@
-// 跨机器压测的代理：和 echo 服务一起运行在服务端机器上，通过 HTTP 向远端客户端报告
-// 各服务的端口和已用 CPU 时间，客户端据此计算每个测试期间的服务端 CPU 占用。
+// Agent for cross-machine benchmarks: runs next to the echo servers on the server machine and reports over HTTP
+// each server's port and CPU time used, from which the remote client computes server CPU per test.
 //
 //	agent -addr :9099 epoll=1234:9101 uringnet-best=1240:9105 ...
 //
-// 接口：
+// Endpoints:
 //
-//	GET /info            服务端机器信息：kernel=... cpus=... host=...
-//	GET /servers         每行 "<名称> <端口>"
-//	GET /cpu?name=<名称>  "<CPU 秒数> <代理单调时钟秒数>"，两次读数相减即得 CPU 占用
+//	GET /info            server machine: kernel=... cpus=... host=...
+//	GET /servers         one "<name> <port>" per line
+//	GET /cpu?name=<name>  "<CPU seconds> <agent monotonic seconds>"; the difference of two readings gives CPU usage
 package main
 
 import (
@@ -28,7 +28,7 @@ type server struct {
 	port int
 }
 
-// 内核 USER_HZ：/proc/<pid>/stat 中 utime、stime 的单位，Linux 上固定为 100
+// Kernel USER_HZ: the unit of utime and stime in /proc/<pid>/stat, always 100 on Linux.
 const userHZ = 100
 
 func main() {
@@ -77,13 +77,13 @@ func main() {
 	log.Fatal(http.ListenAndServe(*addr, nil))
 }
 
-// cpuSeconds 读取进程的用户态 + 内核态 CPU 时间（秒）
+// cpuSeconds reads a process's user + system CPU time in seconds.
 func cpuSeconds(pid int) (float64, error) {
 	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
 	if err != nil {
 		return 0, err
 	}
-	// 进程名（第 2 个字段）可能含空格，从最后一个 ')' 之后开始数：其后第 12、13 个字段是 utime、stime
+	// The process name (field 2) may contain spaces, so count from after the last ')': fields 12 and 13 after it are utime and stime
 	s := string(b)
 	i := strings.LastIndexByte(s, ')')
 	if i < 0 {

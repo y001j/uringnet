@@ -1,6 +1,6 @@
 //go:build linux
 
-// uringnet echo 服务（压测用），可通过参数调整缓冲区、轮询与零拷贝
+// uringnet echo server for benchmarks; flags tune buffers, polling, zero copy and the backend.
 package main
 
 import (
@@ -14,7 +14,7 @@ import (
 
 type echo struct{ uringnet.BuiltinHandler }
 
-// OnTraffic 原样写回：数据位于接收缓冲区中，原地发送
+// OnTraffic writes data back as is: it lies in the receive buffer, so it is sent in place.
 func (echo) OnTraffic(c *uringnet.Conn, data []byte) uringnet.Action {
 	c.Write(data)
 	return uringnet.None
