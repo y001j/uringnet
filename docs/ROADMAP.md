@@ -4,7 +4,9 @@
 
 目标：从实验性项目发展为可以在生产环境使用的网络组件。条目按优先级分组，前两组是生产使用的硬缺口。
 
-**进度**：第一阶段（第 1、2、3、7 项）已完成（2026-11-22，分支 `feat/phase1-hardening`），标记为 ✅。
+**进度**（已完成的标记为 ✅）：
+- 第一阶段（第 1、2、3、7 项）：2026-11-22 完成，包含在 `v0.1.0-alpha` 中。
+- 第二阶段：第 4、5、8、9、10、11、19 项已完成（2026-11-22，分支 `feat/phase2-api`）；第 5 项中的 epoll 回退没有做；第 20、21 项留到发布 v0.1.0 时处理。
 
 优先级：**P0** 上生产前必须完成 · **P1** 发布 v0.1.0 前完成 · **P2** 按需求排期 · **P3** 长期目标
 
@@ -33,12 +35,12 @@
   - 在环内实现（`IORING_OP_TIMEOUT` 或时间轮），不额外开 goroutine。
 - **验收**：单元测试覆盖两种超时；10 万个空闲连接时定时器的开销可以接受。
 
-### 4. 优雅关闭 · P1
+### 4. 优雅关闭 · P1 ✅
 - **现状**：`Shutdown` 会立即关闭所有连接。
 - **要做的**：先停止 accept，等在途的发送完成或超时，再关闭连接和环；提供 `Shutdown(ctx context.Context) error`。
 - **验收**：关闭过程中已经发出的响应不会丢失。
 
-### 5. 启动检查和回退 · P1
+### 5. 启动检查和回退 · P1 ✅
 - **现状**：io_uring 被禁用（seccomp、`kernel.io_uring_disabled`）、`RLIMIT_MEMLOCK` 不足、内核版本太低时，只返回一个笼统的错误。
 - **要做的**：
   - 启动时逐项检测，给出明确的报错和解决办法。
@@ -59,7 +61,7 @@
 - **现状**：`ringloop.go` 里从 gnet 照搬的 `Conn`、`Reader`、`Writer`、`AsyncCallback` 等接口（`AsyncWrite`、`Wake`、`Close(callback)` 等）都没有实现，会误导用户。
 - **要做的**：删掉，或者在第 9 项中真正实现。
 
-### 8. 选项模式的构造函数 · P1
+### 8. 选项模式的构造函数 · P1 ✅
 - **现状**：`NewMany(addr, size, sqpoll, num, options, handler)` 参数多，`sqpoll` 已经弃用，其他配置又分散在 `URingNet` 的公开字段里（`BufferSize`、`SpinTime`、`ZeroCopyThreshold` 等），必须在 `SetLoops` 之前设置。
 - **要做的**：改成类似下面的写法，旧 API 标记为 Deprecated 并保留一个版本：
   ```go
@@ -70,15 +72,15 @@
   )
   ```
 
-### 9. 连接对象 · P1
+### 9. 连接对象 · P1 ✅
 - **现状**：`OnTraffic(data *UserData, eng *URingNet)` 把引擎内部暴露给用户；不能在其他 goroutine 里向连接写数据。
 - **要做的**：提供 `Conn` 对象（`Write`、`WriteNoCopy`、`Close`、`Context`、`RemoteAddr`、`LocalAddr`），并支持从任意 goroutine 安全地异步写入（内部通过 `Post` 投递到事件循环）。
 
-### 10. 统一动作语义 · P1
+### 10. 统一动作语义 · P1 ✅
 - **现状**：`Echo` 和 `Write`、`None` 和 `Read` 是重复的；`EchoAndClose` 的命名不直观。
 - **要做的**：精简为 `None`、`Close`、`Shutdown`，写数据统一通过 `Conn.Write` 完成。
 
-### 11. 日志和钩子 · P1
+### 11. 日志和钩子 · P1 ✅
 - **现状**：没有日志接口，部分内部错误被静默忽略。
 - **要做的**：接受用户传入的 `*slog.Logger`；关键事件（accept 失败、缓冲区耗尽、零拷贝回退）记录日志。
 
@@ -115,7 +117,7 @@
 
 ## 五、工程和发布
 
-### 19. CI 升级 · P1
+### 19. CI 升级 · P1 ✅
 - **现状**：`.github/workflows/go.yml` 使用 Go 1.20 和旧版 action（checkout@v3、setup-go@v4），没有 `-race`，没有 `go vet` 和 staticcheck，没有生成覆盖率文件。
 - **要做的**：
   - 升级 Go 版本和 action，加上 `go vet`、staticcheck、`-race`（`byteslice` 测试在 `-race` 下本来就会失败，需要先单独处理）。
