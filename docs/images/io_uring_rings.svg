@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 384" width="760" height="384" role="img" aria-label="The application and the kernel share two ring buffers" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <title>io_uring: submission queue and completion queue in shared memory</title>
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#8c959f"/></marker></defs>
+  <rect x="0.5" y="0.5" width="759" height="383" rx="10" fill="#ffffff" stroke="#d0d7de"/>
+  <text x="24" y="34" font-size="15" fill="#1f2328" text-anchor="start" font-weight="600">The application and the kernel share two ring buffers</text>
+  <rect x="24" y="58" width="712" height="52" rx="8" fill="none" stroke="#8c959f" stroke-width="1.25"/>
+  <text x="380" y="89" font-size="13" fill="#1f2328" text-anchor="middle" font-weight="600">User space: application (uringnet event loop)</text>
+  <rect x="24" y="138" width="712" height="144" rx="8" fill="#f3f4f6"/>
+  <text x="724" y="158" font-size="11.5" fill="#57606a" text-anchor="end">Shared memory (mmap)</text>
+  <path d="M178.2 154.0A56 56 0 0 1 214.0 168.9L199.1 185.0A34 34 0 0 0 177.4 176.0Z" fill="#0969da" fill-opacity="0.3" stroke="#0969da" stroke-width="1.25"/>
+  <path d="M217.1 172.0A56 56 0 0 1 232.0 207.8L210.0 208.6A34 34 0 0 0 201.0 186.9Z" fill="#0969da" fill-opacity="0.3" stroke="#0969da" stroke-width="1.25"/>
+  <path d="M232.0 212.2A56 56 0 0 1 217.1 248.0L201.0 233.1A34 34 0 0 0 210.0 211.4Z" fill="#0969da" fill-opacity="0.3" stroke="#0969da" stroke-width="1.25"/>
+  <path d="M214.0 251.1A56 56 0 0 1 178.2 266.0L177.4 244.0A34 34 0 0 0 199.1 235.0Z" fill="none" fill-opacity="1" stroke="#8c959f" stroke-width="1.25"/>
+  <path d="M173.8 266.0A56 56 0 0 1 138.0 251.1L152.9 235.0A34 34 0 0 0 174.6 244.0Z" fill="none" fill-opacity="1" stroke="#8c959f" stroke-width="1.25"/>
+  <path d="M134.9 248.0A56 56 0 0 1 120.0 212.2L142.0 211.4A34 34 0 0 0 151.0 233.1Z" fill="none" fill-opacity="1" stroke="#8c959f" stroke-width="1.25"/>
+  <path d="M120.0 207.8A56 56 0 0 1 134.9 172.0L151.0 186.9A34 34 0 0 0 142.0 208.6Z" fill="none" fill-opacity="1" stroke="#8c959f" stroke-width="1.25"/>
+  <path d="M138.0 168.9A56 56 0 0 1 173.8 154.0L174.6 176.0A34 34 0 0 0 152.9 185.0Z" fill="none" fill-opacity="1" stroke="#8c959f" stroke-width="1.25"/>
+  <text x="176" y="215" font-size="14" fill="#1f2328" text-anchor="middle" font-weight="600">SQ</text>
+  <text x="244" y="190" font-size="12.5" fill="#1f2328" text-anchor="start" font-weight="600">Submission queue</text>
+  <text x="244" y="212" font-size="11.5" fill="#57606a" text-anchor="start">tail: app writes</text>
+  <text x="244" y="230" font-size="11.5" fill="#57606a" text-anchor="start">head: kernel reads</text>
+  <path d="M550.2 154.0A56 56 0 0 1 586.0 168.9L571.1 185.0A34 34 0 0 0 549.4 176.0Z" fill="#0969da" fill-opacity="0.3" stroke="#0969da" stroke-width="1.25"/>
+  <path d="M589.1 172.0A56 56 0 0 1 604.0 207.8L582.0 208.6A34 34 0 0 0 573.0 186.9Z" fill="#0969da" fill-opacity="0.3" stroke="#0969da" stroke-width="1.25"/>
+  <path d="M604.0 212.2A56 56 0 0 1 589.1 248.0L573.0 233.1A34 34 0 0 0 582.0 211.4Z" fill="none" fill-opacity="1" stroke="#8c959f" stroke-width="1.25"/>
+  <path d="M586.0 251.1A56 56 0 0 1 550.2 266.0L549.4 244.0A34 34 0 0 0 571.1 235.0Z" fill="none" fill-opacity="1" stroke="#8c959f" stroke-width="1.25"/>
+  <path d="M545.8 266.0A56 56 0 0 1 510.0 251.1L524.9 235.0A34 34 0 0 0 546.6 244.0Z" fill="none" fill-opacity="1" stroke="#8c959f" stroke-width="1.25"/>
+  <path d="M506.9 248.0A56 56 0 0 1 492.0 212.2L514.0 211.4A34 34 0 0 0 523.0 233.1Z" fill="none" fill-opacity="1" stroke="#8c959f" stroke-width="1.25"/>
+  <path d="M492.0 207.8A56 56 0 0 1 506.9 172.0L523.0 186.9A34 34 0 0 0 514.0 208.6Z" fill="none" fill-opacity="1" stroke="#8c959f" stroke-width="1.25"/>
+  <path d="M510.0 168.9A56 56 0 0 1 545.8 154.0L546.6 176.0A34 34 0 0 0 524.9 185.0Z" fill="none" fill-opacity="1" stroke="#8c959f" stroke-width="1.25"/>
+  <text x="548" y="215" font-size="14" fill="#1f2328" text-anchor="middle" font-weight="600">CQ</text>
+  <text x="616" y="190" font-size="12.5" fill="#1f2328" text-anchor="start" font-weight="600">Completion queue</text>
+  <text x="616" y="212" font-size="11.5" fill="#57606a" text-anchor="start">tail: kernel writes</text>
+  <text x="616" y="230" font-size="11.5" fill="#57606a" text-anchor="start">head: app reads</text>
+  <rect x="24" y="310" width="712" height="52" rx="8" fill="none" stroke="#8c959f" stroke-width="1.25"/>
+  <text x="380" y="341" font-size="13" fill="#1f2328" text-anchor="middle" font-weight="600">Kernel: performs the I/O (network send/receive)</text>
+  <g fill="none" stroke="#8c959f" stroke-width="1.25">
+    <path d="M176 110V152" marker-end="url(#arrow)"/>
+    <path d="M176 266V308" marker-end="url(#arrow)"/>
+    <path d="M548 310V268" marker-end="url(#arrow)"/>
+    <path d="M548 154V112" marker-end="url(#arrow)"/>
+    <path d="M372 112V308" stroke-dasharray="4 4" marker-end="url(#arrow)"/>
+  </g>
+  <text x="168" y="133" font-size="11.5" fill="#1f2328" text-anchor="end">&#9312; submit requests (SQEs)</text>
+  <text x="168" y="299" font-size="11.5" fill="#1f2328" text-anchor="end">&#9313; kernel consumes them</text>
+  <text x="556" y="299" font-size="11.5" fill="#1f2328" text-anchor="start">&#9314; kernel posts results (CQEs)</text>
+  <text x="556" y="133" font-size="11.5" fill="#1f2328" text-anchor="start">&#9315; app reaps results</text>
+  <text x="380" y="192" font-size="11.5" fill="#1f2328" text-anchor="start">io_uring_enter</text>
+  <text x="380" y="210" font-size="11.5" fill="#57606a" text-anchor="start">submits a batch,</text>
+  <text x="380" y="226" font-size="11.5" fill="#57606a" text-anchor="start">waits for a batch</text>
+</svg>

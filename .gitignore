@@ -1,9 +1,6 @@
 .idea
 example/example
-example/echoserver
-/bench/
+example/echoserver/echoserver
+example/httpserver/httpserver
 /uringhttp
-/bench/
-!/bench/gnetecho.go.bak
-!/bench/httpbench.go.bak
-!/bench/uringbench.go
+bench/results-*.txt

@@ -1,132 +1,147 @@
 //go:build linux
+// +build linux
 
 package uringnet
 
 import (
-	"bytes"
 	"fmt"
-	"github.com/y001j/uringnet/uring"
-
-	"golang.org/x/sys/unix"
 	"io"
 	"net"
 	"sync"
-	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
+// Ringloop 管理一组 URingNet 事件循环
 type Ringloop struct {
-	socketFd int // listener
-	//idx          int             // loop index in the engine loops list
-	cache bytes.Buffer // temporary buffer for scattered bytes
-	//engine       *engine         // engine in loop
-	//poller       *netpoll.Poller // epoll or kqueue
-	RingNet     []*URingNet       //io_uring instance used in the loop
-	buffer      [][bufLength]byte // read packet buffer whose capacity is set by user, default value is 64KB
-	RingCount   int32             // number of active connections in event-loop
-	udpSockets  map[int]*conn     // client-side UDP socket map: fd -> conn
-	connections sync.Map          // map[int]*conn // TCP connection map: fd -> conn
-	//eventHandler EventHandler  // user eventHandler
+	RingNet   []*URingNet // 事件循环实例
+	RingCount int32       // 实例数量
+
+	listenFds []int // 共享的监听 socket（由 Ringloop 负责关闭）
+
+	stop         chan struct{}
+	shutdownOnce sync.Once
+	done         chan struct{}
 }
 
-// set the buffer length, default buffer length is 1024
-const bufLength uint64 = 2048
-
-// SetLoops
+// SetLoops 为每个 URingNet 创建事件循环（io_uring + provided buffer ring）。
 //
-//	@Description: set the ringloop for the engine
-//	@param urings
-//	@param bufferSize
-//	@return *Ringloop
-//	@return error
-func SetLoops(urings []*URingNet, bufferSize int) (*Ringloop, error) {
+//	@param bufferCount 每个实例的接收缓冲区数量，会向上取整为 2 的幂（最大 32768）；
+//	                   单个缓冲区大小由 URingNet.BufferSize 决定。
+//	                   数量应不少于每个实例上同时活跃的连接数（否则频繁 -ENOBUFS），
+//	                   在此前提下越少越好：内核按 FIFO 轮流使用，缓冲区越少拷贝时缓存越热。
+func SetLoops(urings []*URingNet, bufferCount int) (*Ringloop, error) {
 	size := len(urings)
 	if size == 0 {
 		return nil, fmt.Errorf("no uring instances provided")
 	}
+	bufferCount = roundPow2(bufferCount)
 
-	theloop := &Ringloop{}
-	theloop.RingCount = int32(size)
-	theloop.RingNet = urings
-
-	for i := 0; i < size; i++ {
-		urings[i].ringloop = theloop
-		theloop.RingNet[i] = urings[i]
-		theloop.socketFd = urings[i].SocketFd
-
-		fdstack := make([]int32, 0, 1024)
-		fdstack = append(fdstack, int32(theloop.socketFd))
-		err := theloop.RingNet[i].ring.RegisterFiles(fdstack)
-		if err != nil {
-			return nil, fmt.Errorf("failed to register files for ring %d: %w", i, err)
+	theloop := &Ringloop{
+		RingNet:   urings,
+		RingCount: int32(size),
+		stop:      make(chan struct{}),
+		done:      make(chan struct{}),
+	}
+	shared := map[int]bool{}
+	for i, rn := range urings {
+		if err := rn.start(bufferCount); err != nil {
+			for _, started := range urings[:i] {
+				started.loop.Close()
+			}
+			return nil, fmt.Errorf("failed to set up ring %d: %w", i, err)
 		}
-
-		// Set buffer
-		sqe2 := theloop.RingNet[i].ring.GetSQEntry()
-		urings[i].Autobuffer = make([][bufLength]byte, bufferSize)
-		uring.ProvideBuf(sqe2, urings[i].Autobuffer, uint32(bufferSize), uint32(bufLength), uint16(i))
-		data := makeUserData(provideBuffer)
-		sqe2.SetUserData(data.id)
-		theloop.RingNet[i].userDataList.Store(data.id, data)
-		fmt.Printf("Add Kernel buffer... for ring %d\n", i)
-
-		_, err = theloop.RingNet[i].ring.Submit(1, &paraFlags)
-		if err != nil {
-			return nil, fmt.Errorf("failed to submit buffer for ring %d: %w", i, err)
+		rn.ringloop = theloop
+		if !rn.ownsSocket && !shared[rn.SocketFd] {
+			shared[rn.SocketFd] = true
+			theloop.listenFds = append(theloop.listenFds, rn.SocketFd)
 		}
 	}
 	return theloop, nil
 }
 
-func (loop *Ringloop) GetBuffer() [][bufLength]byte {
-	return loop.buffer
+func roundPow2(n int) int {
+	if n <= 0 {
+		return 1024
+	}
+	if n > 32768 {
+		return 32768
+	}
+	p := 1
+	for p < n {
+		p <<= 1
+	}
+	return p
 }
 
-// EchoLoop Create an accept event  for the loop.
-// to accept should be set every time when server is initiated.
-func (ringNet *URingNet) EchoLoop() {
+// RunMany 启动所有事件循环开始接受连接，立即返回；用 Wait 等待退出。
+func (loop *Ringloop) RunMany() {
+	for _, rn := range loop.RingNet {
+		rn := rn
+		rn.Handler.OnBoot(rn)
+		rn.loop.Post(rn.armAccept)
+	}
+	loop.startTicker()
+}
 
-	sqe := ringNet.ring.GetSQEntry()
-	data := makeUserData(accepted)
-	// len  := unix.SizeofSockaddrAny
-	length := uint32(unix.SizeofSockaddrAny)
-	data.ClientSock = &syscall.RawSockaddrAny{}
-	data.socklen = &length
-	sqe.SetUserData(data.id)
-	sqe.SetFlags(uring.IOSQE_FIXED_FILE)
+// RunMany2 与 RunMany 相同，保留以兼容旧接口
+func (loop *Ringloop) RunMany2() { loop.RunMany() }
 
-	//sqe.SetAddr()
-	//fmt.Println(sqe.UserData())
-	ringNet.userDataList.Store(data.id, data)
-	//ringNet.userDataMap[data.id] = data
-	//set client address in data.client
-	//uring.Accept(sqe, uintptr(ringNet.SocketFd), nil, nil)
-	uring.Accept(sqe, uintptr(0), nil, nil)
+// Wait 阻塞直到 Shutdown 完成
+func (loop *Ringloop) Wait() { <-loop.done }
 
-	_, err := ringNet.ring.Submit(0, &paraFlags)
+// Shutdown 关闭所有连接与事件循环，可在任意 goroutine 中调用（回调中请返回 Shutdown 动作）
+func (loop *Ringloop) Shutdown() {
+	loop.shutdownOnce.Do(func() {
+		close(loop.stop)
+		var wg sync.WaitGroup
+		for _, rn := range loop.RingNet {
+			wg.Add(1)
+			go func(rn *URingNet) {
+				defer wg.Done()
+				rn.ShutDown()
+			}(rn)
+		}
+		wg.Wait()
+		for _, fd := range loop.listenFds {
+			unix.Close(fd)
+		}
+		close(loop.done)
+	})
+}
 
-	//fmt.Println("echo server running...")
-
-	if err != nil {
-		fmt.Printf("prep request error: %v\n", err)
+// startTicker 驱动 OnTick（使用第一个实例的 Handler），OnTick 在独立的 goroutine 中执行
+func (loop *Ringloop) startTicker() {
+	h := loop.RingNet[0].Handler
+	delay, action := h.OnTick()
+	if action == Shutdown {
+		go loop.Shutdown()
 		return
 	}
-}
-
-func (loop *Ringloop) RunMany() {
-
-	for i := 0; i < int(loop.RingCount); i++ {
-		loop.RingNet[i].EchoLoop()
-		go loop.RingNet[i].Run2(uint16(i))
+	if delay <= 0 {
+		return
 	}
-}
-
-func (loop *Ringloop) RunMany2() {
-
-	for i := 0; i < int(loop.RingCount); i++ {
-		loop.RingNet[i].EchoLoop()
-		go loop.RingNet[i].Run(uint16(i))
-	}
+	go func() {
+		t := time.NewTimer(delay)
+		defer t.Stop()
+		for {
+			select {
+			case <-loop.stop:
+				return
+			case <-t.C:
+			}
+			d, act := h.OnTick()
+			if act == Shutdown {
+				go loop.Shutdown()
+				return
+			}
+			if d <= 0 {
+				return
+			}
+			t.Reset(d)
+		}
+	}()
 }
 
 // Action is an action that occurs after the completion of an event.
@@ -139,7 +154,8 @@ const (
 	Read
 	EchoAndClose // response then close
 	Write
-	Close //Close the connection.
+	Close    // Close the connection.
+	Shutdown // Shutdown the whole engine.
 )
 
 // Reader is an interface that consists of a number of methods for reading that Conn must implement.
