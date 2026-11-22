@@ -26,6 +26,15 @@ configuration (incremental buffers + adaptive busy polling; see [Benchmark](#ben
 What io_uring brings is far fewer system calls (under load as few as 0.04 per request, versus 2–3 for epoll), batched submission, and
 zero-copy send for large buffers. The gains depend heavily on the workload and the machine, so measure with your own traffic.
 
+#### How io_uring works
+
+![io_uring: the application and the kernel share a submission queue and a completion queue](docs/images/io_uring_rings.svg)
+
+The application and the kernel share two ring buffers in memory mapped into both. The application writes requests (SQEs) at the
+tail of the submission queue and the kernel takes them from its head; the kernel writes results (CQEs) at the tail of the
+completion queue and the application takes them from its head. Neither step is a system call: a single `io_uring_enter`
+submits a whole batch of requests and waits for a batch of results.
+
 ### Should You adopt it in your project
 
 UringNet was designed for IoT gateways: many connections, small messages, request/response traffic. It provides TCP and Unix
@@ -188,6 +197,9 @@ With `ZeroCopyThreshold > 0` the receive buffer ring is also registered as an io
 - What stays: the receive side still copies from the socket into the buffer ring. Removing that needs io_uring
   zero-copy receive (zcrx, `IORING_OP_RECV_ZC`, Linux 6.15+), which requires NIC support (header split, flow steering,
   a dedicated RX queue) and is not implemented.
+- Expected on real hardware: across machines on a real NIC, zero-copy send should lower CPU usage for large sends (roughly
+  10KB and up), because the kernel no longer copies the data into the socket buffer; the NIC sends straight from the
+  buffer. This is not measured yet (see *Benchmark*), and small messages do not benefit.
 - Caveats: it only pays off above roughly 10KB per send; **traffic to a local socket (loopback, containers on the same host)
   is always copied by the kernel**, so it is slower there; pinned pages count against `RLIMIT_MEMLOCK`. If registration
   fails, uringnet falls back to plain `SEND_ZC`. If `SEND_ZC` fails with `ENOMEM`/`EOPNOTSUPP`, it falls back to normal sends.
@@ -313,6 +325,8 @@ Why the two designs win in different places:
    where always-on polling would cost up to ~20% throughput (512 connections, 16KB: 0.81x vs 0.93x of epoll).
 4. The kernel version matters: on 6.10 without polling, uringnet is mostly 10–30% behind epoll.
 5. Zero-copy send is not measured: data sent to a local socket is always copied by the kernel, so it needs two machines and a real NIC.
+   On real hardware it is expected to help bulk transfers (sends of roughly 10KB and up) by removing the copy into the socket
+   buffer, which is where gnet currently leads; small messages will not benefit. Measuring this is the next step.
 
 ### Caveats
 
