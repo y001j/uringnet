@@ -55,7 +55,7 @@ func SetLoops(urings []*URingNet, bufferCount int) (*Ringloop, error) {
 			return nil, fmt.Errorf("failed to set up ring %d: %w", i, err)
 		}
 		rn.ringloop = theloop
-		if !rn.ownsSocket && !shared[rn.SocketFd] {
+		if !rn.ownsSocket && rn.SocketFd >= 0 && !shared[rn.SocketFd] {
 			shared[rn.SocketFd] = true
 			theloop.listenFds = append(theloop.listenFds, rn.SocketFd)
 		}

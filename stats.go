@@ -10,6 +10,7 @@ import "time"
 type Stats struct {
 	Connections   int64  // connections open now
 	Accepted      uint64 // connections accepted
+	Dialed        uint64 // outgoing connections established (Dial, DialAsync)
 	AcceptErrors  uint64 // failed accepts (for example EMFILE); retried with backoff
 	BytesRead     uint64 // bytes received
 	BytesWritten  uint64 // bytes sent
@@ -57,6 +58,7 @@ func (rn *URingNet) stats() Stats {
 	return Stats{
 		Connections:         int64(len(rn.conns)),
 		Accepted:            rn.accepted,
+		Dialed:              rn.dialed,
 		AcceptErrors:        rn.acceptErrs,
 		BytesRead:           rn.bytesIn,
 		BytesWritten:        rn.bytesOut,
@@ -71,6 +73,7 @@ func (rn *URingNet) stats() Stats {
 func (t *Stats) add(s Stats) {
 	t.Connections += s.Connections
 	t.Accepted += s.Accepted
+	t.Dialed += s.Dialed
 	t.AcceptErrors += s.AcceptErrors
 	t.BytesRead += s.BytesRead
 	t.BytesWritten += s.BytesWritten
