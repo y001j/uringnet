@@ -4,6 +4,7 @@
 package uringnet
 
 import (
+	"io"
 	"syscall"
 	"unsafe"
 
@@ -60,10 +61,18 @@ type conn struct {
 	iov        [maxIov]unix.Iovec
 	msg        unix.Msghdr
 	spare      [][]byte // 复用的拷贝缓冲区
-	closeAfter bool     // 发送完成后关闭（EchoAndClose）
+	closeAfter bool     // 发送完成后关闭（EchoAndClose、Conn.Close）
 	batching   bool     // 正在执行回调：入队的数据暂不发送，回调结束后由 flush 一并发出
 	closed     bool     // 已 shutdown，等待在途请求结束
 	freed      bool
+	err        error // 关闭原因，交给 OnClose
+
+	// 当前 OnTraffic 中的接收缓冲区：写入的数据位于其中时可以原地发送（curBid < 0 表示不在 OnTraffic 中）
+	curBuf  []byte
+	curBid  int32
+	curHeld bool // 当前接收缓冲区被发送队列占用，回调结束后不能归还
+
+	api Conn // 新 API 中交给回调的连接对象
 
 	onRecvH iouring.Handler
 	onSendH iouring.Handler
@@ -73,9 +82,10 @@ type conn struct {
 const maxIov = 16
 
 func newConn(rn *URingNet, fd int) *conn {
-	c := &conn{rn: rn, fd: fd, lastActive: rn.tick, lastSend: rn.tick}
+	c := &conn{rn: rn, fd: fd, lastActive: rn.tick, lastSend: rn.tick, curBid: -1}
 	c.ud.Fd = int32(fd)
 	c.ud.c = c
+	c.api.c = c
 	// 缓存方法值，避免每次提交请求都分配闭包
 	c.onRecvH = c.onRecv
 	c.onSendH = c.onSend
@@ -168,76 +178,57 @@ func (c *conn) onRecv(res int32, flags uint32) {
 		}
 	case res > 0:
 		c.armRecv()
+	case res == 0:
+		// 对端关闭了写方向（可能只是半关闭，仍在等回复）：不再接收，把已写入的数据发完再关闭；
+		// 对端已完全关闭时发送会失败，连接随之关闭
+		if c.err == nil {
+			c.err = io.EOF
+		}
+		c.closeAfterFlush()
 	default:
-		// EOF（res == 0）或出错
-		c.close()
+		c.fail(syscall.Errno(-res))
 	}
 }
 
 // deliver 把一个接收缓冲区中的数据交给 OnTraffic，没有被发送队列占用时立即归还
 func (c *conn) deliver(bid uint16, data []byte) {
-	rn := c.rn
-	held := false
-	if len(data) > 0 && !c.closed {
-		c.ud.Buffer = data
-		c.ud.BufSize = int32(len(data))
-		action := rn.Handler.OnTraffic(&c.ud, rn)
-		held = c.handleAction(action, data, int32(bid))
-		c.ud.Buffer = nil
-		c.ud.BufSize = 0
-	}
+	held := c.traffic(bid, data)
 	if !held {
-		rn.br.Recycle(bid)
+		c.rn.br.Recycle(bid)
 	}
 }
 
-// deliverInc 是增量消费模式下的 deliver：原地发送的片段给所在缓冲区加一个引用
+// deliverInc 是增量消费模式下的 deliver：原地发送的片段在 writeFrom 中给缓冲区加引用，
+// 缓冲区由调用方在内核用完且没有引用时归还
 func (c *conn) deliverInc(bid uint16, data []byte) {
-	rn := c.rn
-	if len(data) == 0 || c.closed {
-		return
-	}
-	c.ud.Buffer = data
-	c.ud.BufSize = int32(len(data))
-	action := rn.Handler.OnTraffic(&c.ud, rn)
-	if c.handleAction(action, data, int32(bid)) {
-		if rn.incRefs[bid] == 0 {
-			rn.incPinned++
-		}
-		rn.incRefs[bid]++
-	}
-	c.ud.Buffer = nil
-	c.ud.BufSize = 0
+	c.traffic(bid, data)
 }
 
-// handleAction 处理回调返回的动作。recvBuf/bid 为本次接收数据所在的缓冲区
-// （OnOpen 时为 nil/-1）。返回 true 表示该缓冲区被发送队列占用，不能立即归还。
-func (c *conn) handleAction(action Action, recvBuf []byte, bid int32) (held bool) {
-	switch action {
-	case Echo, Write:
-		held = c.writeFrom(c.ud.WriteBuf, recvBuf, bid)
-	case EchoAndClose:
-		held = c.writeFrom(c.ud.WriteBuf, recvBuf, bid)
-		c.closeAfter = true
-		if !c.sending && len(c.q) == 0 {
-			c.close() // 没有待发送的数据；否则在发送完成后关闭
-		}
-	case Close:
-		c.close()
-	case Shutdown:
-		if rl := c.rn.ringloop; rl != nil {
-			go rl.Shutdown()
-		}
+// traffic 调用 OnTraffic，返回接收缓冲区是否被发送队列占用
+func (c *conn) traffic(bid uint16, data []byte) (held bool) {
+	if len(data) == 0 || c.closed {
+		return false
 	}
-	// 重置 WriteBuf 以便用户复用其底层数组（如 append 构造响应）；
-	// 但如果它指向接收缓冲区（data.WriteBuf = data.Buffer），必须丢弃，
-	// 否则用户下次 append 会写进已归还给内核的缓冲区。
-	if overlaps(c.ud.WriteBuf, recvBuf) {
-		c.ud.WriteBuf = nil
-	} else {
-		c.ud.WriteBuf = c.ud.WriteBuf[:0]
-	}
+	c.curBuf, c.curBid, c.curHeld = data, int32(bid), false
+	c.rn.h.traffic(c, data)
+	held = c.curHeld
+	c.curBuf, c.curBid, c.curHeld = nil, -1, false
 	return held
+}
+
+// send 发送 b：在 OnTraffic 中且 b 位于本次接收缓冲区时尽量原地发送，否则拷贝
+func (c *conn) send(b []byte) {
+	if c.writeFrom(b, c.curBuf, c.curBid) {
+		c.curHeld = true
+	}
+}
+
+// closeAfterFlush 在发送队列清空后关闭连接；队列已空时立即关闭
+func (c *conn) closeAfterFlush() {
+	c.closeAfter = true
+	if !c.sending && len(c.q) == 0 {
+		c.close()
+	}
 }
 
 // writeFrom 发送 b：发送队列为空且 b 位于本次接收缓冲区时原地发送（返回 true），否则拷贝。
@@ -250,7 +241,15 @@ func (c *conn) writeFrom(b, recvBuf []byte, bid int32) bool {
 		return false
 	}
 	if bid >= 0 && c.canHold(uint16(bid)) && within(b, recvBuf) {
-		c.rn.held++
+		rn := c.rn
+		rn.held++
+		if rn.inc {
+			// 每个原地发送的片段给缓冲区加一个引用，releaseBuf 中逐个释放
+			if rn.incRefs[bid] == 0 {
+				rn.incPinned++
+			}
+			rn.incRefs[bid]++
+		}
 		c.enqueue(seg{b: b, bid: bid, release: nil})
 		return true
 	}
@@ -395,6 +394,7 @@ func (c *conn) zcHandler(ref *zcRef) iouring.Handler {
 			// 内核或 socket 不支持零拷贝（EOPNOTSUPP/EINVAL），或 pin 页超出 RLIMIT_MEMLOCK（ENOMEM）：
 			// 这些条件不会很快改变，关闭本实例的零拷贝，用普通 send 重发
 			c.rn.zcOff = true
+			c.rn.log.Warn("uringnet: zero-copy send unavailable, falling back to normal sends", "ring", c.rn.index, "err", syscall.Errno(-res))
 			c.sending = false
 			if !c.closed {
 				c.sendHead()
@@ -410,7 +410,11 @@ func (c *conn) onSend(res int32, flags uint32) {
 	if res <= 0 || c.closed {
 		// 出错（含 shutdown 后的 -EPIPE / -ECANCELED）
 		c.sending = false
-		c.close()
+		if res < 0 {
+			c.fail(syscall.Errno(-res))
+		} else {
+			c.fail(io.ErrShortWrite)
+		}
 		return
 	}
 	c.qBytes -= int(res)
@@ -433,10 +437,7 @@ func (c *conn) onSend(res int32, flags uint32) {
 	}
 	c.sending = false
 
-	if c.rn.Handler.OnWritten(c.ud) == Close {
-		c.close()
-		return
-	}
+	c.rn.h.written(c)
 	if c.closeAfter {
 		c.close()
 	}
@@ -463,6 +464,14 @@ func (c *conn) finish(s seg) {
 	default:
 		c.rn.releaseBuf(s.bid, s.release)
 	}
+}
+
+// fail 以 err 为原因关闭连接（交给 OnClose）；连接已经在关闭时保留原来的原因
+func (c *conn) fail(err error) {
+	if !c.closed && c.err == nil {
+		c.err = err
+	}
+	c.close()
 }
 
 // close 关闭连接：shutdown 让在途请求尽快结束，fd 在 maybeFree 中关闭。
@@ -493,7 +502,7 @@ func (c *conn) free() {
 	delete(c.rn.conns, c.fd)
 	c.rn.connCount.Add(-1)
 	unix.Close(c.fd)
-	c.rn.Handler.OnClose(c.ud)
+	c.rn.h.closed(c)
 	if !c.sending {
 		for len(c.q) > 0 {
 			c.popHead()

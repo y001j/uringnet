@@ -73,75 +73,99 @@ go get -u github.com/y001j/uringnet
 package main
 
 import (
+	"context"
 	"os"
 	"os/signal"
-	"runtime"
 	"syscall"
+	"time"
 
 	"github.com/y001j/uringnet"
-	socket "github.com/y001j/uringnet/sockets"
 )
 
-type echoServer struct {
-	uringnet.BuiltinEventEngine
-}
+type echo struct{ uringnet.BuiltinHandler }
 
-// OnTraffic runs on the ring's event-loop thread every time data arrives.
-// data.Buffer is only valid during the callback; WriteBuf is copied (or sent
-// zero-copy when it points into data.Buffer).
-func (es *echoServer) OnTraffic(data *uringnet.UserData, ringnet *uringnet.URingNet) uringnet.Action {
-	data.WriteBuf = data.Buffer
-	return uringnet.Echo
+// OnTraffic runs on the connection's event-loop thread every time data arrives.
+// data is only valid during the callback. Writing it back sends it in place,
+// straight from the receive buffer, without a copy.
+func (echo) OnTraffic(c *uringnet.Conn, data []byte) uringnet.Action {
+	c.Write(data)
+	return uringnet.None
 }
 
 func main() {
-	options := socket.SocketOptions{TCPNoDelay: socket.TCPNoDelay, ReusePort: true}
-	ringNets, err := uringnet.NewMany(uringnet.NetAddress{AddrType: socket.Tcp4, Address: os.Args[1]},
-		4096, false, runtime.NumCPU(), options, &echoServer{})
+	srv, err := uringnet.Listen("tcp", ":8080", echo{},
+		uringnet.WithBuffers(256, 16<<10), // 256 receive buffers of 16KB per ring
+		uringnet.WithIdleTimeout(5*time.Minute),
+	)
 	if err != nil {
 		panic(err)
 	}
-	loop, err := uringnet.SetLoops(ringNets, 256) // 256 receive buffers per ring
-	if err != nil {
-		panic(err)
-	}
-	loop.RunMany()
-
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-	go func() { <-sig; loop.Shutdown() }()
-	loop.Wait()
+	go func() {
+		sig := make(chan os.Signal, 1)
+		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+		<-sig
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		srv.Shutdown(ctx) // stop accepting, send what was written, then close
+	}()
+	srv.Serve() // returns uringnet.ErrServerClosed after Shutdown
 }
 ```
 
 ### Important APIs
 
+**Server**
+
 | API | Description |
 |---|---|
-| `NewMany(addr, size, sqpoll, num, options, handler)` | create `num` rings; with `ReusePort` each ring gets its own listening socket. `sqpoll` is deprecated and ignored. Only stream protocols (tcp/tcp4/tcp6/unix) are supported. |
-| `URingNet.BufferSize` | size of one receive buffer, set before `SetLoops` (default 16KB) |
-| `URingNet.SpinTime` | busy-poll before blocking (e.g. `50*time.Microsecond`): lower latency at the cost of CPU. Adaptive by default: it stops when the loop is busy |
-| `URingNet.SpinBusyBatch` / `SpinIdleBatch` | adaptive polling thresholds: stop polling at this average batch size per loop iteration, resume below the other (defaults 128 / 64) |
-| `URingNet.SpinFixed` | always poll, even under full load |
-| `URingNet.ZeroCopyThreshold` | enable zero-copy send (`IORING_OP_SEND_ZC`) for writes of at least this many bytes; 0 disables |
-| `URingNet.RecvBundle` | recv bundles: one completion can carry several receive buffers. `BundleAuto` (default) enables them on Linux 6.16+ only; see below |
-| `URingNet.IncrementalBuffers` | **experimental**: incremental buffer ring (Linux 6.12+), best with `BufferSize` 64KB and 32+ buffers; see below |
-| `URingNet.MaxWriteBuffer` | per-connection send queue limit (default 4MB, negative = unlimited). Above it the connection's receiving is paused (no `OnTraffic`) until the queue drains below half, so a peer that does not read cannot make the server buffer without limit |
-| `URingNet.IdleTimeout` | close connections that have neither received nor sent data for this long (0 disables) |
-| `URingNet.WriteTimeout` | close connections whose send queue has made no progress for this long, e.g. a peer that stopped reading (0 disables) |
-| `SetLoops(rings, bufferCount)` | create the event loops; `bufferCount` (receive buffers per ring) is rounded up to a power of 2 (max 32768). See *Sizing receive buffers* below |
-| `UserData.WriteNoCopy(b, release)` | queue `b` without copying; `release` is called once the kernel no longer uses it |
-| `Ringloop.RunMany()` / `Wait()` / `Shutdown()` | start accepting / block until shut down / close all connections and loops |
-| `URingNet.Post(fn)` | run `fn` on the ring's event-loop thread (from any goroutine) |
+| `Listen(network, address, handler, opts...)` | create a server on `tcp`, `tcp4`, `tcp6` or `unix`; it accepts connections once `Serve` runs |
+| `Server.Serve()` | serve until shut down; returns `ErrServerClosed` |
+| `Server.Shutdown(ctx)` | graceful: stop accepting, let each connection send the data already written, then close it; connections still open when `ctx` ends are closed at once |
+| `Server.Close()` | close everything at once |
+| `Server.Addr()` / `Connections()` | listening address (with the real port for `:0`) / open connections |
+
+**Options**
+
+| Option | Description |
+|---|---|
+| `WithRings(n)` | number of event loops, each with its own io_uring and locked OS thread (default `runtime.NumCPU()`) |
+| `WithBuffers(count, size)` | receive buffers per ring: `count` (rounded up to a power of 2, default 256) of `size` bytes (default 16KB). See *Sizing receive buffers* |
+| `WithBusyPoll(d)` | poll for completions for `d` (e.g. `50*time.Microsecond`) before blocking: lower latency for more CPU. Adaptive: it stops while the loop is fully loaded |
+| `WithBusyPollThresholds(busy, idle)` / `WithBusyPollFixed(d)` | tune the adaptive thresholds (default 128 / 64 completions per loop iteration) / always poll |
+| `WithZeroCopy(threshold)` | send writes of at least `threshold` bytes with `IORING_OP_SEND_ZC`; see below |
+| `WithRecvBundle(mode)` | recv bundles; `BundleAuto` (default) enables them on Linux 6.16+ only; see below |
+| `WithIncrementalBuffers()` | **experimental**: incremental buffer ring (Linux 6.12+), best with `WithBuffers(32, 64<<10)`; see below |
+| `WithMaxWriteBuffer(n)` | per-connection send queue limit (default 4MB, negative = unlimited). Above it the connection stops receiving (no `OnTraffic`) until the queue drains below half, so a peer that does not read cannot make the server buffer without limit |
+| `WithIdleTimeout(d)` | close connections that neither receive nor send data for `d` |
+| `WithWriteTimeout(d)` | close connections whose send queue makes no progress for `d`, e.g. a peer that stopped reading |
+| `WithReusePort(on)` / `WithTCPNoDelay(on)` | one listening socket per ring with `SO_REUSEPORT` (default on) / `TCP_NODELAY` (default on) |
+| `WithLogger(*slog.Logger)` | warnings about failures the server recovers from (accept errors, zero-copy fallback) and debug messages (timeouts); silent by default |
+
+**Handler and Conn**
+
+| API | Description |
+|---|---|
+| `OnBoot(s)` / `OnShutdown(s)` | once when serving starts / after everything is closed |
+| `OnOpen(c) Action` | a connection was accepted |
+| `OnTraffic(c, data) Action` | data arrived; `data` is only valid during the call |
+| `OnClose(c, err)` | exactly once per connection. `err` is `nil` (closed by you), `io.EOF` (peer closed), `ErrIdleTimeout`, `ErrWriteTimeout`, `ErrServerClosed`, or the socket error |
+| `Conn.Write(b)` | queue `b`. Copied, unless `b` lies inside the current `data`: then it is sent in place |
+| `Conn.WriteNoCopy(b, release)` | queue `b` without copying; `release` is called once the kernel no longer uses it |
+| `Conn.Close()` | close after the data already written is sent |
+| `Conn.AsyncWrite(b, done)` / `AsyncClose()` | the same from any goroutine |
+| `Conn.Context()` / `SetContext(v)` | per-connection state |
+| `Conn.RemoteAddr()` / `LocalAddr()` / `Fd()` / `Buffered()` | addresses, socket fd, bytes queued |
+
+Actions: `None`, `Close` (same as `Conn.Close`), `Shutdown` (closes the whole server).
 
 Callback semantics:
 
-- All callbacks except `OnTick` run on the ring's event-loop thread and must not block.
-- `UserData` is per connection and lives for the whole connection; use `UserData.Context` for per-connection state.
-- Actions: `Echo`/`Write` send `WriteBuf`; `EchoAndClose` sends then closes; `Close` closes; `Shutdown` shuts down the engine; `None`/`Read` do nothing (receiving is always active).
-- Writes on one connection are ordered; short writes are handled. Everything queued during one callback is sent together
-  after it returns, and separate segments (for example `WriteNoCopy` data plus a `WriteBuf` header) go out in one `sendmsg`.
-- `OnClose` is called exactly once per connection, including peer close, errors and `Shutdown`.
+- All callbacks run on the connection's event-loop thread and must not block. Use `AsyncWrite` to reply from other goroutines.
+- Writes on one connection are ordered; short writes are handled. Everything written during one callback is sent together
+  after it returns, and separate segments (for example `WriteNoCopy` data plus a header) go out in one `sendmsg`.
+- When the peer shuts down its write side, the data already written is still sent before the connection is closed.
+
+The earlier API (`NewMany`, `SetLoops`, `EventHandler`, `UserData`) still works but is deprecated.
 
 ### Sizing receive buffers
 
@@ -175,11 +199,9 @@ the kernel has finished filling it and no slice is referenced. Because a referen
 connection can send several received slices in place, which avoids most user-space copies.
 
 ```go
-for _, rn := range ringNets {
-	rn.IncrementalBuffers = true
-	rn.BufferSize = 64 << 10
-}
-loop, err := uringnet.SetLoops(ringNets, 32) // 32 x 64KB per ring
+srv, err := uringnet.Listen("tcp", ":8080", handler,
+	uringnet.WithIncrementalBuffers(),
+	uringnet.WithBuffers(32, 64<<10)) // 32 x 64KB per ring
 ```
 
 - In the Linux 6.17 benchmark this was the fastest uringnet configuration: ahead of gnet with 512 connections (small messages
@@ -190,19 +212,19 @@ loop, err := uringnet.SetLoops(ringNets, 32) // 32 x 64KB per ring
 
 ### Zero-copy send
 
-With `ZeroCopyThreshold > 0` the receive buffer ring is also registered as an io_uring *fixed buffer*
+With `WithZeroCopy(threshold)` the receive buffer ring is also registered as an io_uring *fixed buffer*
 (`IORING_REGISTER_BUFFERS`). That one memory region is shared by user space and the kernel:
 
 ```
           kernel receives into it            kernel transmits from it
  NIC/TCP ───────────────────────►  buffer ring (pinned, mapped once)  ───────────────────► NIC/TCP
-          (provided buffers)          ▲ OnTraffic sees data.Buffer       (SEND_ZC + FIXED_BUF)
+          (provided buffers)          ▲ OnTraffic sees data              (SEND_ZC + FIXED_BUF)
                                       │ in place, no copy
 ```
 
-- Echo/forwarding (`data.WriteBuf = data.Buffer`): the data is sent from the receive buffer itself with
+- Echo/forwarding (`c.Write(data)` in `OnTraffic`): the data is sent from the receive buffer itself with
   `SendZCFixed`; the buffer goes back to the ring only after the kernel's notification CQE (`IORING_CQE_F_NOTIF`).
-- Large responses you own (cached files, pre-built payloads): `data.WriteNoCopy(b, release)` sends `b` with `SEND_ZC`
+- Large responses you own (cached files, pre-built payloads): `c.WriteNoCopy(b, release)` sends `b` with `SEND_ZC`
   without copying it into the socket buffer.
 - What stays: the receive side still copies from the socket into the buffer ring. Removing that needs io_uring
   zero-copy receive (zcrx, `IORING_OP_RECV_ZC`, Linux 6.15+), which requires NIC support (header split, flow steering,
@@ -391,5 +413,4 @@ at the top of that script and rerun it after new measurements.
   and Linux 6.6+ can disable it with `kernel.io_uring_disabled`. There is no epoll fallback yet.
 - Only stream sockets (TCP, Unix) are supported; UDP and TLS are not.
 - Recv bundles need Linux 6.16+ for correct data (see *Recv bundles*).
-- When accept fails (for example `EMFILE`) it is retried with exponential backoff (5ms up to 1s); there is no callback
-  or log for it yet.
+- When accept fails (for example `EMFILE`) it is retried with exponential backoff (5ms up to 1s) and logged with `WithLogger`.

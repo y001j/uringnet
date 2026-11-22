@@ -4,11 +4,15 @@
 package uringnet
 
 import (
+	"context"
 	stderrors "errors"
 	"fmt"
+	"log/slog"
 	"net"
+	"strconv"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	iouring "github.com/y001j/iouring-go"
@@ -25,7 +29,24 @@ const DefaultBufferSize = 16384
 // DefaultMaxWriteBuffer 是每个连接发送队列的默认上限，见 URingNet.MaxWriteBuffer
 const DefaultMaxWriteBuffer = 4 << 20
 
-var errConnClosed = stderrors.New("uringnet: connection closed")
+var (
+	// ErrKernelTooOld is returned when the running kernel is older than Linux 6.0.
+	ErrKernelTooOld = stderrors.New("uringnet: Linux 6.0 or later is required")
+	// ErrIOUringUnavailable is returned when io_uring cannot be used: it is disabled by a
+	// seccomp profile (Docker, Kubernetes RuntimeDefault), by kernel.io_uring_disabled, or
+	// not compiled into the kernel.
+	ErrIOUringUnavailable = stderrors.New("uringnet: io_uring is not available")
+)
+
+// discardLogger 是默认的日志：什么也不输出
+var discardLogger = slog.New(discardHandler{})
+
+type discardHandler struct{}
+
+func (discardHandler) Enabled(context.Context, slog.Level) bool  { return false }
+func (discardHandler) Handle(context.Context, slog.Record) error { return nil }
+func (d discardHandler) WithAttrs([]slog.Attr) slog.Handler      { return d }
+func (d discardHandler) WithGroup(string) slog.Handler           { return d }
 
 // URingNet 是一个 io_uring 事件循环实例。
 //
@@ -88,10 +109,15 @@ type URingNet struct {
 	// 与 MaxWriteBuffer 配合，可以清理只发不读或已经失联的对端。
 	WriteTimeout time.Duration
 
+	// Logger 接收运行中的异常和回退（accept 失败、零拷贝回退等），nil 表示不输出
+	Logger *slog.Logger
+
 	index      int
 	entries    uint32
 	ownsSocket bool // SocketFd 是否由本实例独占（ReusePort 时每个实例一个监听 socket）
 
+	h        connHandler // 回调：旧 API 时包装 Handler，新 API 时包装 Server 的 Handler
+	log      *slog.Logger
 	loop     *iouring.Loop
 	br       *iouring.BufferRing
 	ringloop *Ringloop
@@ -102,6 +128,7 @@ type URingNet struct {
 	maxHeld     int     // 原地发送最多占用的接收缓冲区数量（缓冲区总数的一半）
 	starved     []*conn // 因缓冲区耗尽（-ENOBUFS）而暂停接收的连接
 	stopping    bool
+	draining    bool // 优雅关闭中：不再接受新连接，现有连接发完数据后关闭
 	fixedIdx    int  // 接收缓冲区的固定缓冲区下标，-1 表示未注册
 	zcOff       bool // 内核不支持零拷贝时自动关闭
 	zcSends     int  // SEND_ZC 次数（测试用）
@@ -131,6 +158,8 @@ type URingNet struct {
 }
 
 // UserData 是一个连接在回调中的视图，每个连接一个，在连接的整个生命周期内复用。
+//
+// Deprecated: use Handler, which receives a *Conn. UserData will be removed in a later release.
 type UserData struct {
 	Fd int32
 
@@ -196,6 +225,8 @@ func bundleSafeKernel() bool {
 }
 
 // NetAddress 描述监听地址
+//
+// Deprecated: Listen takes the network and address directly.
 type NetAddress struct {
 	AddrType socket.NetAddressType
 	Address  string
@@ -206,6 +237,8 @@ type NetAddress struct {
 // size 为 SQ 大小（内核会向上取整为 2 的幂）。sqpoll 已不再使用：
 // 事件循环改为 SINGLE_ISSUER/DEFER_TASKRUN 模式，每轮只有一次 io_uring_enter，
 // 不需要额外的 SQPOLL 内核线程空转。
+//
+// Deprecated: use Listen.
 func New(addr NetAddress, size uint, sqpoll bool, options socket.SocketOptions) (*URingNet, error) {
 	rings, err := NewMany(addr, size, sqpoll, 1, options, nil)
 	if err != nil {
@@ -223,6 +256,8 @@ func New(addr NetAddress, size uint, sqpoll bool, options socket.SocketOptions) 
 // options.ReusePort 为 true 时每个实例创建自己的监听 socket，由内核在它们之间均衡新连接；
 // 否则所有实例共享一个监听 socket。
 // 目前只支持面向流的协议（tcp/tcp4/tcp6/unix）。
+//
+// Deprecated: use Listen with options (WithRings, WithBuffers, ...).
 func NewMany(addr NetAddress, size uint, sqpoll bool, num int, options socket.SocketOptions, handler EventHandler) ([]*URingNet, error) {
 	if num <= 0 {
 		return nil, fmt.Errorf("uringnet: invalid number of rings %d", num)
@@ -258,6 +293,10 @@ func NewMany(addr NetAddress, size uint, sqpoll bool, num int, options socket.So
 				cleanup()
 				return nil, err
 			}
+			if i == 0 && perRing && num > 1 {
+				// 端口为 0 时各个监听 socket 会绑到不同的随机端口：其余的改用第一个实际得到的端口
+				addr.Address = boundAddress(addr.Address, fd)
+			}
 			if !perRing {
 				sharedFd = fd
 			}
@@ -275,6 +314,25 @@ func NewMany(addr NetAddress, size uint, sqpoll bool, num int, options socket.So
 		}
 	}
 	return rings, nil
+}
+
+// boundAddress 在 address 的端口为 0 时返回带上 fd 实际端口的地址，否则原样返回
+func boundAddress(address string, fd int) string {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil || port != "0" {
+		return address
+	}
+	sa, err := unix.Getsockname(fd)
+	if err != nil {
+		return address
+	}
+	switch a := sa.(type) {
+	case *unix.SockaddrInet4:
+		return net.JoinHostPort(host, strconv.Itoa(a.Port))
+	case *unix.SockaddrInet6:
+		return net.JoinHostPort(host, strconv.Itoa(a.Port))
+	}
+	return address
 }
 
 func listen(addr NetAddress, options socket.SocketOptions) (int, error) {
@@ -304,8 +362,18 @@ func listen(addr NetAddress, options socket.SocketOptions) (int, error) {
 
 // start 创建事件循环，在 SetLoops 中调用
 func (rn *URingNet) start(bufferCount int) error {
-	if rn.Handler == nil {
-		return fmt.Errorf("uringnet: ring %d has no Handler", rn.index)
+	if rn.h == nil {
+		if rn.Handler == nil {
+			return fmt.Errorf("uringnet: ring %d has no Handler", rn.index)
+		}
+		rn.h = legacyHandler{rn.Handler}
+	}
+	rn.log = rn.Logger
+	if rn.log == nil {
+		rn.log = discardLogger
+	}
+	if err := checkKernel(); err != nil {
+		return err
 	}
 	if rn.BufferSize <= 0 {
 		rn.BufferSize = DefaultBufferSize
@@ -320,18 +388,21 @@ func (rn *URingNet) start(bufferCount int) error {
 		SpinIdleBatch: rn.SpinIdleBatch,
 	}
 	l, err := iouring.NewLoop(cfg)
-	if err != nil && cfg.BufferRings[0].Incremental {
+	if err != nil && cfg.BufferRings[0].Incremental && !unavailable(err) {
 		// 内核不支持增量消费（6.12 之前），退回普通 buffer ring
+		rn.log.Info("uringnet: incremental buffers not supported, using a normal buffer ring", "ring", rn.index, "err", err)
 		cfg.BufferRings[0].Incremental = false
 		l, err = iouring.NewLoop(cfg)
 	}
-	if err != nil && cfg.BufferRings[0].Fixed {
+	if err != nil && cfg.BufferRings[0].Fixed && !unavailable(err) {
 		// 注册固定缓冲区失败（通常是 RLIMIT_MEMLOCK 不足），退回不注册：SEND_ZC 仍可用，只是逐次 pin 页
+		rn.log.Info("uringnet: cannot register receive buffers as fixed buffers (RLIMIT_MEMLOCK?), zero-copy sends will pin pages per send",
+			"ring", rn.index, "err", err)
 		cfg.BufferRings[0].Fixed = false
 		l, err = iouring.NewLoop(cfg)
 	}
 	if err != nil {
-		return fmt.Errorf("%w: %v", errors.ErrRingSetup, err)
+		return setupError(err)
 	}
 	rn.loop = l
 	rn.br = l.BufferRing(0)
@@ -377,7 +448,7 @@ const (
 )
 
 func (rn *URingNet) armAccept() {
-	if rn.stopping {
+	if rn.stopping || rn.draining {
 		return
 	}
 	rn.acceptArms++
@@ -387,13 +458,13 @@ func (rn *URingNet) armAccept() {
 func (rn *URingNet) onAccept(res int32, flags uint32) {
 	if res >= 0 {
 		rn.acceptBackoff = 0
-		if rn.stopping {
+		if rn.stopping || rn.draining {
 			unix.Close(int(res))
 		} else {
 			rn.openConn(int(res))
 		}
 	}
-	if flags&iouring_syscall.IORING_CQE_F_MORE != 0 || rn.stopping {
+	if flags&iouring_syscall.IORING_CQE_F_MORE != 0 || rn.stopping || rn.draining {
 		return
 	}
 	// multishot accept 已终止
@@ -408,6 +479,7 @@ func (rn *URingNet) onAccept(res int32, flags uint32) {
 	} else if rn.acceptBackoff *= 2; rn.acceptBackoff > acceptBackoffMax {
 		rn.acceptBackoff = acceptBackoffMax
 	}
+	rn.log.Warn("uringnet: accept failed, retrying", "ring", rn.index, "err", syscall.Errno(-res), "retry_in", rn.acceptBackoff)
 	rn.after(rn.acceptBackoff, rn.armAccept)
 }
 
@@ -417,11 +489,7 @@ func (rn *URingNet) openConn(fd int) {
 	rn.connCount.Add(1)
 
 	c.batching = true
-	out, action := rn.Handler.OnOpen(&c.ud)
-	if len(out) > 0 {
-		c.write(out)
-	}
-	c.handleAction(action, nil, -1)
+	rn.h.open(c)
 	c.batching = false
 	c.flush()
 	c.checkBackpressure()
@@ -437,7 +505,29 @@ func (rn *URingNet) shutdownLoop() {
 	// io_uring 中的 multishot accept 持有文件引用，ring 的释放是异步的，端口会短暂保持监听。
 	unix.Shutdown(rn.SocketFd, unix.SHUT_RD)
 	for _, c := range rn.conns {
+		if c.err == nil {
+			c.err = ErrServerClosed
+		}
 		c.free()
+	}
+}
+
+// drain 开始优雅关闭（Loop 线程）：停止接受新连接，每个连接把已写入的数据发完后关闭。
+// 发送一直没有进展的连接由 WriteTimeout 或最终的 ShutDown 处理。
+func (rn *URingNet) drain() {
+	if rn.draining || rn.stopping {
+		return
+	}
+	rn.draining = true
+	unix.Shutdown(rn.SocketFd, unix.SHUT_RD)
+	for _, c := range rn.conns {
+		if c.closed {
+			continue
+		}
+		if c.err == nil {
+			c.err = ErrServerClosed
+		}
+		c.closeAfterFlush()
 	}
 }
 
@@ -457,10 +547,43 @@ func (rn *URingNet) ShutDown() {
 		if rn.ownsSocket {
 			unix.Close(rn.SocketFd)
 		}
-		if rn.Handler != nil {
-			rn.Handler.OnShutdown(rn)
+		if rn.h != nil {
+			rn.h.shutdown(rn)
 		}
 	})
+}
+
+// checkKernel 检查内核版本不低于 6.0（multishot recv 与 provided buffer ring）
+func checkKernel() error {
+	var u unix.Utsname
+	if unix.Uname(&u) != nil {
+		return nil
+	}
+	release := unix.ByteSliceToString(u.Release[:])
+	var major, minor int
+	if n, _ := fmt.Sscanf(release, "%d.%d", &major, &minor); n == 2 && major < 6 {
+		return fmt.Errorf("%w: running %s", ErrKernelTooOld, release)
+	}
+	return nil
+}
+
+// unavailable 判断 io_uring_setup 的错误是否表示 io_uring 不可用（而不是某个功能不支持）
+func unavailable(err error) bool {
+	return stderrors.Is(err, syscall.EPERM) || stderrors.Is(err, syscall.ENOSYS) || stderrors.Is(err, syscall.EACCES)
+}
+
+// setupError 给创建事件循环失败的错误加上原因和解决办法
+func setupError(err error) error {
+	switch {
+	case unavailable(err):
+		return fmt.Errorf("%w: %w: %v (blocked by seccomp? Docker needs --security-opt seccomp=unconfined or a profile "+
+			"allowing io_uring_setup/io_uring_enter/io_uring_register; also check sysctl kernel.io_uring_disabled)",
+			errors.ErrRingSetup, ErrIOUringUnavailable, err)
+	case stderrors.Is(err, syscall.ENOMEM):
+		return fmt.Errorf("%w: %v (out of locked memory? raise RLIMIT_MEMLOCK, ulimit -l, or use fewer/smaller buffers)",
+			errors.ErrRingSetup, err)
+	}
+	return fmt.Errorf("%w: %v", errors.ErrRingSetup, err)
 }
 
 func sockaddrToNetAddr(sa unix.Sockaddr) net.Addr {

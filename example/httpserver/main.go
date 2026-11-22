@@ -2,27 +2,28 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
-	"runtime"
 	"syscall"
 	"time"
 
 	"github.com/y001j/uringnet"
-	socket "github.com/y001j/uringnet/sockets"
 )
 
 // 一个最简 HTTP/1.1 服务，只用于压测：每个以 \r\n\r\n 结尾的请求回复一个固定响应。
 // 连接管理遵循 HTTP 规则：HTTP/1.1 默认长连接，带 "Connection: close" 时回复后关闭；
 // HTTP/1.0 默认回复后关闭，带 "Connection: keep-alive" 时保持（ab 不加 -k 时依赖服务端关闭连接）。
 type httpServer struct {
-	uringnet.BuiltinEventEngine
+	uringnet.BuiltinHandler
 }
 
-// httpCodec 保存每个连接未处理完的请求数据（请求可能跨多次 recv）
+// httpCodec 保存每个连接未处理完的请求数据（请求可能跨多次 recv）和复用的响应缓冲区
 type httpCodec struct {
 	buf []byte
+	out []byte
 }
 
 var delimiter = []byte("\r\n\r\n")
@@ -78,39 +79,43 @@ func requestMode(header []byte) connMode {
 	return modeDefault
 }
 
-func (hs *httpServer) OnOpen(data *uringnet.UserData) ([]byte, uringnet.Action) {
-	data.Context = &httpCodec{}
-	return nil, uringnet.None
+func (hs *httpServer) OnOpen(c *uringnet.Conn) uringnet.Action {
+	c.SetContext(&httpCodec{})
+	return uringnet.None
 }
 
-func (hs *httpServer) OnTraffic(data *uringnet.UserData, ringnet *uringnet.URingNet) uringnet.Action {
-	codec := data.Context.(*httpCodec)
-	in := data.Buffer
+func (hs *httpServer) OnTraffic(c *uringnet.Conn, data []byte) uringnet.Action {
+	codec := c.Context().(*httpCodec)
+	in := data
 	if len(codec.buf) > 0 {
 		codec.buf = append(codec.buf, in...)
 		in = codec.buf
 	}
-	for {
+	out := codec.out[:0]
+	closing := false
+	for !closing {
 		i := bytes.Index(in, delimiter)
 		if i < 0 {
 			break
 		}
 		mode := requestMode(in[:i])
-		data.WriteBuf = appendResponse(data.WriteBuf, mode)
-		if mode == modeClose {
-			return uringnet.EchoAndClose // 发送完响应后关闭，忽略之后的数据
-		}
+		out = appendResponse(out, mode)
+		closing = mode == modeClose // 回复后关闭，忽略之后的数据
 		in = in[i+len(delimiter):]
+	}
+	if len(out) > 0 {
+		c.Write(out) // 拷贝进发送队列，out 可以复用
+	}
+	codec.out = out
+	if closing {
+		return uringnet.Close // 已写入的响应发完后关闭
 	}
 	if len(in) > 64*1024 {
 		return uringnet.Close // 请求头过大
 	}
-	// 保留未处理完的部分（data.Buffer 在回调后失效，必须拷贝）
+	// 保留未处理完的部分（data 在回调后失效，必须拷贝）
 	codec.buf = append(codec.buf[:0], in...)
-	if len(data.WriteBuf) == 0 {
-		return uringnet.None
-	}
-	return uringnet.Write
+	return uringnet.None
 }
 
 func main() {
@@ -118,27 +123,27 @@ func main() {
 		fmt.Println("Usage: httpserver <address>")
 		os.Exit(1)
 	}
-	addr := os.Args[1]
-	rings := runtime.NumCPU()
-
-	options := socket.SocketOptions{TCPNoDelay: socket.TCPNoDelay, ReusePort: true}
-	ringNets, err := uringnet.NewMany(uringnet.NetAddress{AddrType: socket.Tcp4, Address: addr}, 4096, false, rings, options, &httpServer{})
+	srv, err := uringnet.Listen("tcp", os.Args[1], &httpServer{},
+		// 每个 ring 256 个接收缓冲区：ring 是 FIFO，缓冲区越多拷贝时缓存越冷，够用即可
+		uringnet.WithBuffers(256, 16<<10),
+		// 可选：uringnet.WithBusyPoll(50*time.Microsecond) 降低延迟
+	)
 	if err != nil {
 		fmt.Println(err)
 		os.Exit(1)
 	}
-	// 可选：rn.SpinTime（阻塞前忙轮询，降低延迟）、rn.ZeroCopyThreshold（大块数据零拷贝发送）
-	// 每个 ring 256 个接收缓冲区：ring 是 FIFO，缓冲区越多拷贝时缓存越冷，够用即可
-	loop, err := uringnet.SetLoops(ringNets, 256)
-	if err != nil {
+	fmt.Printf("HTTP server listening on %s\n", srv.Addr())
+
+	go func() {
+		sig := make(chan os.Signal, 1)
+		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+		<-sig
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		srv.Shutdown(ctx)
+	}()
+	if err := srv.Serve(); !errors.Is(err, uringnet.ErrServerClosed) {
 		fmt.Println(err)
 		os.Exit(1)
 	}
-	loop.RunMany()
-	fmt.Printf("HTTP server started on %s with %d rings\n", addr, rings)
-
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-	go func() { <-sig; loop.Shutdown() }()
-	loop.Wait()
 }

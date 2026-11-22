@@ -63,74 +63,97 @@ go get -u github.com/y001j/uringnet
 package main
 
 import (
+	"context"
 	"os"
 	"os/signal"
-	"runtime"
 	"syscall"
+	"time"
 
 	"github.com/y001j/uringnet"
-	socket "github.com/y001j/uringnet/sockets"
 )
 
-type echoServer struct {
-	uringnet.BuiltinEventEngine
-}
+type echo struct{ uringnet.BuiltinHandler }
 
-// 每次收到数据时，OnTraffic 在该 ring 的事件循环线程上运行。
-// data.Buffer 只在回调期间有效；WriteBuf 会被拷贝
-// （当它指向 data.Buffer 时则以零拷贝方式发送）。
-func (es *echoServer) OnTraffic(data *uringnet.UserData, ringnet *uringnet.URingNet) uringnet.Action {
-	data.WriteBuf = data.Buffer
-	return uringnet.Echo
+// 每次收到数据时，OnTraffic 在该连接所属的事件循环线程上运行。
+// data 只在回调期间有效。把它原样写回时直接从接收缓冲区发送，不拷贝。
+func (echo) OnTraffic(c *uringnet.Conn, data []byte) uringnet.Action {
+	c.Write(data)
+	return uringnet.None
 }
 
 func main() {
-	options := socket.SocketOptions{TCPNoDelay: socket.TCPNoDelay, ReusePort: true}
-	ringNets, err := uringnet.NewMany(uringnet.NetAddress{AddrType: socket.Tcp4, Address: os.Args[1]},
-		4096, false, runtime.NumCPU(), options, &echoServer{})
+	srv, err := uringnet.Listen("tcp", ":8080", echo{},
+		uringnet.WithBuffers(256, 16<<10), // 每个 ring 256 个 16KB 的接收缓冲区
+		uringnet.WithIdleTimeout(5*time.Minute),
+	)
 	if err != nil {
 		panic(err)
 	}
-	loop, err := uringnet.SetLoops(ringNets, 256) // 每个 ring 256 个接收缓冲区
-	if err != nil {
-		panic(err)
-	}
-	loop.RunMany()
-
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-	go func() { <-sig; loop.Shutdown() }()
-	loop.Wait()
+	go func() {
+		sig := make(chan os.Signal, 1)
+		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+		<-sig
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		srv.Shutdown(ctx) // 不再接受新连接，已写入的数据发完后关闭连接
+	}()
+	srv.Serve() // Shutdown 之后返回 uringnet.ErrServerClosed
 }
 ```
 
 ### 主要 API
 
+**Server**
+
 | API | 说明 |
 |---|---|
-| `NewMany(addr, size, sqpoll, num, options, handler)` | 创建 `num` 个 ring；开启 `ReusePort` 时每个 ring 有自己的监听套接字。`sqpoll` 已弃用，会被忽略。只支持流式协议（tcp/tcp4/tcp6/unix）。 |
-| `URingNet.BufferSize` | 单个接收缓冲区的大小，需在 `SetLoops` 之前设置（默认 16KB） |
-| `URingNet.SpinTime` | 阻塞前先忙轮询一段时间（如 `50*time.Microsecond`）：以 CPU 换取更低的延迟。默认是自适应的：循环繁忙时自动停止轮询 |
-| `URingNet.SpinBusyBatch` / `SpinIdleBatch` | 自适应轮询的阈值：每轮循环的平均批量达到前者时停止轮询，低于后者时恢复（默认 128 / 64） |
-| `URingNet.SpinFixed` | 始终轮询，满负载时也不停止 |
-| `URingNet.ZeroCopyThreshold` | 写入不少于这么多字节时启用零拷贝发送（`IORING_OP_SEND_ZC`）；0 表示关闭 |
-| `URingNet.RecvBundle` | recv bundle：一个完成事件可以携带多个接收缓冲区。`BundleAuto`（默认）只在 Linux 6.16+ 上启用，见下文 |
-| `URingNet.IncrementalBuffers` | **实验性**：增量缓冲区 ring（Linux 6.12+），`BufferSize` 设为 64KB、缓冲区数量 32 个以上时效果最好，见下文 |
-| `URingNet.MaxWriteBuffer` | 每个连接发送队列的上限（默认 4MB，负数表示不限制）。超过时暂停接收该连接的数据（不再调用 `OnTraffic`），队列降到一半以下后恢复，这样不读数据的对端不会让服务端无限缓存 |
-| `URingNet.IdleTimeout` | 连接在这段时间内既没收到也没发出数据就关闭（0 表示不检查） |
-| `URingNet.WriteTimeout` | 发送队列在这段时间内没有任何发送进展（例如对端不再读取）就关闭连接（0 表示不检查） |
-| `SetLoops(rings, bufferCount)` | 创建事件循环；`bufferCount`（每个 ring 的接收缓冲区数量）会向上取整为 2 的幂（最大 32768）。见下文*接收缓冲区的数量* |
-| `UserData.WriteNoCopy(b, release)` | 不拷贝地把 `b` 加入发送队列；内核不再使用它时调用 `release` |
-| `Ringloop.RunMany()` / `Wait()` / `Shutdown()` | 开始接受连接 / 阻塞直到关闭 / 关闭所有连接和事件循环 |
-| `URingNet.Post(fn)` | 在该 ring 的事件循环线程上运行 `fn`（可从任意 goroutine 调用） |
+| `Listen(network, address, handler, opts...)` | 在 `tcp`、`tcp4`、`tcp6` 或 `unix` 上创建服务；调用 `Serve` 后开始接受连接 |
+| `Server.Serve()` | 运行服务直到关闭；返回 `ErrServerClosed` |
+| `Server.Shutdown(ctx)` | 优雅关闭：停止接受新连接，每个连接把已写入的数据发完后关闭；`ctx` 结束时仍未关闭的连接立即关闭 |
+| `Server.Close()` | 立即关闭所有连接和事件循环 |
+| `Server.Addr()` / `Connections()` | 监听地址（`:0` 时为实际端口）/ 当前连接数 |
+
+**选项**
+
+| 选项 | 说明 |
+|---|---|
+| `WithRings(n)` | 事件循环数量，每个有自己的 io_uring 和锁定的系统线程（默认 `runtime.NumCPU()`） |
+| `WithBuffers(count, size)` | 每个 ring 的接收缓冲区：`count` 个（向上取整为 2 的幂，默认 256），每个 `size` 字节（默认 16KB）。见下文*接收缓冲区的数量* |
+| `WithBusyPoll(d)` | 阻塞前先忙轮询 `d`（如 `50*time.Microsecond`）：以 CPU 换取更低的延迟。自适应：循环满载时自动停止 |
+| `WithBusyPollThresholds(busy, idle)` / `WithBusyPollFixed(d)` | 调整自适应轮询的阈值（默认每轮 128 / 64 个完成事件）/ 始终轮询 |
+| `WithZeroCopy(threshold)` | 不少于 `threshold` 字节的写入使用 `IORING_OP_SEND_ZC` 发送，见下文 |
+| `WithRecvBundle(mode)` | recv bundle；`BundleAuto`（默认）只在 Linux 6.16+ 上启用，见下文 |
+| `WithIncrementalBuffers()` | **实验性**：增量缓冲区 ring（Linux 6.12+），配合 `WithBuffers(32, 64<<10)` 效果最好，见下文 |
+| `WithMaxWriteBuffer(n)` | 每个连接发送队列的上限（默认 4MB，负数表示不限制）。超过时暂停接收该连接的数据（不再调用 `OnTraffic`），队列降到一半以下后恢复，这样不读数据的对端不会让服务端无限缓存 |
+| `WithIdleTimeout(d)` | 连接在 `d` 内既没收到也没发出数据就关闭 |
+| `WithWriteTimeout(d)` | 发送队列在 `d` 内没有任何进展（例如对端不再读取）就关闭连接 |
+| `WithReusePort(on)` / `WithTCPNoDelay(on)` | 每个 ring 一个开启 `SO_REUSEPORT` 的监听套接字（默认开启）/ `TCP_NODELAY`（默认开启） |
+| `WithLogger(*slog.Logger)` | 输出服务能自行恢复的异常（accept 失败、零拷贝回退）的警告，以及超时等调试信息；默认不输出 |
+
+**Handler 和 Conn**
+
+| API | 说明 |
+|---|---|
+| `OnBoot(s)` / `OnShutdown(s)` | 开始服务时调用一次 / 全部关闭后调用一次 |
+| `OnOpen(c) Action` | 接受了一个连接 |
+| `OnTraffic(c, data) Action` | 收到数据；`data` 只在回调期间有效 |
+| `OnClose(c, err)` | 每个连接恰好调用一次。`err` 为 `nil`（你主动关闭）、`io.EOF`（对端关闭）、`ErrIdleTimeout`、`ErrWriteTimeout`、`ErrServerClosed`，或套接字错误 |
+| `Conn.Write(b)` | 把 `b` 加入发送队列。会拷贝，除非 `b` 位于本次的 `data` 中，此时原地发送 |
+| `Conn.WriteNoCopy(b, release)` | 不拷贝地加入发送队列；内核不再使用 `b` 后调用 `release` |
+| `Conn.Close()` | 已写入的数据发完后关闭连接 |
+| `Conn.AsyncWrite(b, done)` / `AsyncClose()` | 同上，可在任意 goroutine 中调用 |
+| `Conn.Context()` / `SetContext(v)` | 连接级的状态 |
+| `Conn.RemoteAddr()` / `LocalAddr()` / `Fd()` / `Buffered()` | 地址、套接字 fd、排队待发的字节数 |
+
+返回的动作：`None`、`Close`（等同于 `Conn.Close`）、`Shutdown`（关闭整个服务）。
 
 回调的语义：
 
-- 除 `OnTick` 外，所有回调都在 ring 的事件循环线程上运行，不能阻塞。
-- `UserData` 每个连接一个，生命周期与连接相同；连接级的状态放在 `UserData.Context` 里。
-- 返回的动作：`Echo`/`Write` 发送 `WriteBuf`；`EchoAndClose` 发送后关闭连接；`Close` 关闭连接；`Shutdown` 关闭整个引擎；`None`/`Read` 什么也不做（接收始终处于开启状态）。
-- 同一连接上的写入保持顺序，并会处理部分写入。一次回调中加入队列的数据会在回调返回后一起发送，多个独立的数据段（例如 `WriteNoCopy` 的数据加上 `WriteBuf` 中的头部）通过一次 `sendmsg` 发出。
-- 每个连接的 `OnClose` 恰好调用一次，包括对端关闭、出错和 `Shutdown` 的情况。
+- 所有回调都在连接所属的事件循环线程上运行，不能阻塞。要从其他 goroutine 回复数据，用 `AsyncWrite`。
+- 同一连接上的写入保持顺序，并会处理部分写入。一次回调中写入的数据会在回调返回后一起发送，多个独立的数据段（例如 `WriteNoCopy` 的数据加上头部）通过一次 `sendmsg` 发出。
+- 对端关闭写方向（半关闭）后，已写入的数据仍会发完再关闭连接。
+
+旧的 API（`NewMany`、`SetLoops`、`EventHandler`、`UserData`）仍然可用，但已标记为弃用。
 
 ### 接收缓冲区的数量
 
@@ -151,11 +174,9 @@ func main() {
 `IncrementalBuffers = true` 会以 `IOU_PBUF_RING_INC` 注册接收 ring（Linux 6.12+）。内核不再为每次接收占用一整个缓冲区，而是把每次接收的数据追加到同一个缓冲区中上一段数据之后，于是少量大缓冲区就能装下来自许多连接的数据。每次原地发送引用缓冲区中的一段；当内核已填满某个缓冲区、并且没有任何片段仍被引用时，该缓冲区才归还给内核。由于被引用的缓冲区仍然可以继续接收数据，一个连接可以原地发送多个接收到的片段，从而避免了大部分用户态拷贝。
 
 ```go
-for _, rn := range ringNets {
-	rn.IncrementalBuffers = true
-	rn.BufferSize = 64 << 10
-}
-loop, err := uringnet.SetLoops(ringNets, 32) // 每个 ring 32 x 64KB
+srv, err := uringnet.Listen("tcp", ":8080", handler,
+	uringnet.WithIncrementalBuffers(),
+	uringnet.WithBuffers(32, 64<<10)) // 每个 ring 32 x 64KB
 ```
 
 - 在 Linux 6.17 的性能测试中，这是 uringnet 最快的配置：512 个连接时领先 gnet（小消息领先约 15%），批量流水线传输时与 gnet 相差 5–10%（见[性能测试](#性能测试)）。
@@ -165,17 +186,17 @@ loop, err := uringnet.SetLoops(ringNets, 32) // 每个 ring 32 x 64KB
 
 ### 零拷贝发送
 
-当 `ZeroCopyThreshold > 0` 时，接收缓冲区 ring 还会注册为 io_uring 的 *fixed buffer*（`IORING_REGISTER_BUFFERS`）。这块内存由用户态和内核共享：
+使用 `WithZeroCopy(threshold)` 时，接收缓冲区 ring 还会注册为 io_uring 的 *fixed buffer*（`IORING_REGISTER_BUFFERS`）。这块内存由用户态和内核共享：
 
 ```
           内核把数据接收到这里                  内核直接从这里发送
  NIC/TCP ───────────────────────►  缓冲区 ring（固定在内存中，只映射一次） ───────────────────► NIC/TCP
-          (provided buffers)          ▲ OnTraffic 原地看到 data.Buffer       (SEND_ZC + FIXED_BUF)
+          (provided buffers)          ▲ OnTraffic 原地看到 data              (SEND_ZC + FIXED_BUF)
                                       │ 不拷贝
 ```
 
-- Echo/转发（`data.WriteBuf = data.Buffer`）：数据直接从接收缓冲区本身用 `SendZCFixed` 发出；缓冲区要等到内核的通知 CQE（`IORING_CQE_F_NOTIF`）之后才回到 ring。
-- 你自己持有的大块响应（缓存的文件、预先构造的数据）：`data.WriteNoCopy(b, release)` 用 `SEND_ZC` 发送 `b`，不把它拷贝进套接字缓冲区。
+- Echo/转发（在 `OnTraffic` 中 `c.Write(data)`）：数据直接从接收缓冲区本身用 `SendZCFixed` 发出；缓冲区要等到内核的通知 CQE（`IORING_CQE_F_NOTIF`）之后才回到 ring。
+- 你自己持有的大块响应（缓存的文件、预先构造的数据）：`c.WriteNoCopy(b, release)` 用 `SEND_ZC` 发送 `b`，不把它拷贝进套接字缓冲区。
 - 仍然存在的拷贝：接收方向上，数据仍要从套接字拷贝到缓冲区 ring。要去掉这次拷贝需要 io_uring 零拷贝接收（zcrx，`IORING_OP_RECV_ZC`，Linux 6.15+），它需要网卡支持（header split、flow steering、专用的接收队列），目前没有实现。
 - 在真实硬件上的预期：跨机器、使用真实网卡时，零拷贝发送应能降低大块发送（大约 10KB 以上）的 CPU 占用，因为内核不再把数据拷贝进套接字缓冲区，网卡直接从缓冲区发送。这一点还没有实测（见*性能测试*），小消息不会受益。
 - 注意事项：只有每次发送大约 10KB 以上才划算；**发往本机套接字的流量（loopback、同一主机上的容器）总是会被内核拷贝**，所以在这种情况下反而更慢；固定在内存中的页会计入 `RLIMIT_MEMLOCK`。注册失败时，uringnet 回退到普通的 `SEND_ZC`。`SEND_ZC` 因 `ENOMEM`/`EOPNOTSUPP` 失败时，回退到普通发送。
@@ -339,4 +360,4 @@ python3 bench/scripts/summarize.py r.txt epoll
 - 需要 Linux 6.0+ 并启用 io_uring。Docker 默认的 seccomp 配置和 Kubernetes 的 `RuntimeDefault` 会禁用 io_uring，Linux 6.6+ 还可以通过 `kernel.io_uring_disabled` 关闭它。目前没有回退到 epoll 的机制。
 - 只支持流式套接字（TCP、Unix），不支持 UDP 和 TLS。
 - recv bundle 需要 Linux 6.16+ 才能保证数据正确（见 *Recv bundle*）。
-- accept 失败（例如 `EMFILE`）时会按指数退避重试（5ms 起，最长 1s），目前还没有相应的回调或日志。
+- accept 失败（例如 `EMFILE`）时会按指数退避重试（5ms 起，最长 1s），并通过 `WithLogger` 输出日志。
