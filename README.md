@@ -46,7 +46,7 @@ submits a whole batch of requests and waits for a batch of results.
 ### Should You adopt it in your project
 
 UringNet was designed for IoT gateways: many connections, small messages, request/response traffic. It provides TCP, Unix
-stream sockets and UDP, TLS, outgoing connections, message framing and an MQTT broker. Consider it if:
+stream sockets and UDP, TLS, outgoing connections, message framing, an MQTT broker and Modbus. Consider it if:
 
 - you run Linux 6.0+ (6.16+ for recv bundles) and io_uring is allowed on the host (it is blocked by Docker's and Kubernetes'
   default seccomp profiles; without io_uring uringnet falls back to epoll, which works but loses most of the advantage), and
@@ -282,6 +282,39 @@ Against Mosquitto 2.0.22 (both on 1 core, QoS 1 publishers waiting for each PUBA
 It interoperates with the `mosquitto_pub`/`mosquitto_sub` clients in MQTT 5 and 3.1.1 (QoS 0–2, retained, wills with
 delay, persistent sessions, properties).
 `example/mqttbroker` is a runnable broker.
+
+### Modbus
+
+The `modbus` package speaks Modbus TCP and Modbus RTU over TCP (RTU frames with CRC, as serial device servers and
+DTUs in transparent mode carry them), with functions 0x01–0x06, 0x0F, 0x10 and 0x17 and exception responses.
+
+- **`Client`** — a master for devices it connects to: requests from any goroutine with a `context`, pipelining
+  (several Modbus TCP requests outstanding, matched by transaction ID), timeouts, retries, and automatic
+  reconnection with backoff; requests made while a device is down wait for it.
+- **`DTUServer`** — a master for devices that connect *in*: 4G/Ethernet DTUs and serial device servers in client
+  mode. It parses the registration packet (for example the IMEI) to identify each DTU, discards heartbeat packets
+  wherever they appear between frames, replaces a DTU's old connection when it reconnects, and gives each online DTU
+  a `Link` to poll the RS-485 devices behind it. This is where one process with a few event loops holding thousands
+  of long-lived DTU connections pays off.
+- **`Server`** — a slave answering from a `Handler`; `Memory` is a ready-made data model and `Units` routes by unit ID.
+
+```go
+s := modbus.NewDTUServer(modbus.DTUConfig{
+	LinkConfig: modbus.LinkConfig{Framing: modbus.RTUOverTCP, Timeout: 2 * time.Second, Retries: 1},
+	Register:   modbus.RegisterFixed(15), // 15-byte IMEI
+	Heartbeat:  []byte("HB"),
+	OnOnline:   func(l *modbus.Link) { go poll(l) },
+})
+srv, err := uringnet.Listen("tcp", ":9000", s.Handler())
+go srv.Serve()
+// ...
+regs, err := s.Link("860000000000001").ReadHoldingRegisters(ctx, 1, 0, 10)
+```
+
+RTU has no transaction IDs, so a `Link` sends one RTU request at a time, ignores responses that do not fit the
+outstanding request, and waits `Drain` after a timeout so a late answer is not taken for the next one. Verified
+against pymodbus (both directions, both framings) and mbpoll/libmodbus. `example/modbusdtu` is a runnable DTU server.
+Serial lines (RS-485 directly on the host) are out of scope.
 
 ### Sizing receive buffers
 

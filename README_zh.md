@@ -39,7 +39,7 @@ io_uring 带来的是少得多的系统调用（高负载下每个请求低至 0
 
 ### 是否适合你的项目
 
-UringNet 是为物联网网关设计的：连接多、消息小、请求/响应式的流量。它支持 TCP、Unix 流式套接字和 UDP、TLS，以及拨出连接、消息分帧和 MQTT broker。满足以下条件时可以考虑使用：
+UringNet 是为物联网网关设计的：连接多、消息小、请求/响应式的流量。它支持 TCP、Unix 流式套接字和 UDP、TLS，以及拨出连接、消息分帧、MQTT broker 和 Modbus。满足以下条件时可以考虑使用：
 
 - 运行 Linux 6.0+（recv bundle 需要 6.16+），并且主机允许使用 io_uring（Docker 和 Kubernetes 默认的 seccomp 配置会禁用它；没有 io_uring 时会回退到 epoll，能运行，但失去了大部分优势）；
 - 你在意延迟或系统调用开销，并且能为忙轮询留出一些 CPU。
@@ -255,6 +255,35 @@ broker.Publish("devices/42/cmd", []byte("reboot"), 1, false)
 | 1000 个发布者，无订阅者 | 31.4 万条/秒 | 17.9 万条/秒 | 1.75 |
 
 与 `mosquitto_pub`/`mosquitto_sub` 客户端在 MQTT 5 和 3.1.1 下互通（QoS 0–2、保留消息、带延迟的遗嘱、持久会话、消息属性）。`example/mqttbroker` 是一个可以直接运行的 broker。
+
+### Modbus
+
+`modbus` 包支持 Modbus TCP 和 RTU over TCP（带 CRC 的 RTU 帧直接走 TCP，串口服务器和透传模式的 DTU 都是这种方式），支持功能码
+0x01–0x06、0x0F、0x10、0x17，以及异常响应。
+
+- **`Client`**：主动连接设备的主站。可以在任意 goroutine 里发请求，每个请求都带 `context`；支持流水线（Modbus TCP 下一条连接上同时有
+  多个请求，按事务号匹配）、超时、重试，以及带退避的断线自动重连；设备掉线期间发出的请求会等它恢复。
+- **`DTUServer`**：面向**主动连上来**的设备的主站，比如 4G/以太网 DTU、客户端模式的串口服务器。它解析注册包（例如 IMEI）来识别每台
+  DTU，丢弃帧之间任意位置出现的心跳包；DTU 重连时用新连接替换旧连接，并为每台在线 DTU 提供一个 `Link`，用来轮询它后面挂的 RS-485
+  设备。一个进程、少量事件循环维持上万条 DTU 长连接，正是 uringnet 擅长的场景。
+- **`Server`**：从站，由 `Handler` 回答请求；`Memory` 是现成的内存寄存器模型，`Units` 按单元号把请求分发给不同设备。
+
+```go
+s := modbus.NewDTUServer(modbus.DTUConfig{
+	LinkConfig: modbus.LinkConfig{Framing: modbus.RTUOverTCP, Timeout: 2 * time.Second, Retries: 1},
+	Register:   modbus.RegisterFixed(15), // 15 字节的 IMEI
+	Heartbeat:  []byte("HB"),
+	OnOnline:   func(l *modbus.Link) { go poll(l) },
+})
+srv, err := uringnet.Listen("tcp", ":9000", s.Handler())
+go srv.Serve()
+// ...
+regs, err := s.Link("860000000000001").ReadHoldingRegisters(ctx, 1, 0, 10)
+```
+
+RTU 没有事务号，所以 `Link` 在 RTU 下一次只发一个请求，丢弃与当前请求不相符的响应，并在超时后等待 `Drain` 时长再发下一个请求，避免把迟到的
+响应当成下一个请求的回答。已与 pymodbus（双向、两种分帧）和 mbpoll/libmodbus 做过互通测试。`example/modbusdtu` 是一个可以直接运行的
+DTU 服务器。直接接在主机上的串口（RS-485）不在本库范围内。
 
 ### 接收缓冲区的数量
 
