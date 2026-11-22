@@ -4,7 +4,8 @@
 Usage (from the repo root):  python3 bench/scripts/charts.py
 
 No dependencies. Writes a light and a dark variant of each chart; the README
-picks one with <picture> according to the GitHub theme.
+picks one with <picture> according to the GitHub theme. English charts go to
+bench_*_{light,dark}.svg, Chinese ones (for README_zh.md) to bench_*_zh_{light,dark}.svg.
 """
 import os
 
@@ -20,6 +21,31 @@ THEMES = {
     "dark": {
         "text": "#f0f6fc", "muted": "#9198a1", "grid": "#30363d", "ref": "#9198a1",
         "series": ["#3987e5", "#d95926", "#199e70"], "neutral": "#6e7681", "gap": "#0d1117",
+    },
+}
+
+# Chart text per language. Scenario labels are written in English below and translated by
+# replacing "conn" with LANGS[lang]["conn"].
+LANGS = {
+    "en": {
+        "suffix": "", "conn": "conn",
+        "adaptive": "uringnet, adaptive polling", "nopoll": "uringnet, no polling",
+        "tp_title": "Throughput relative to epoll (higher is better)",
+        "tp_sub": "Echo server on 1 core, Linux 6.17, incremental buffers. Under each label: epoll requests/s.",
+        "tp_svg": "uringnet throughput relative to epoll",
+        "lat_title": "Median latency at low and medium load (lower is better)",
+        "lat_sub": "Echo server on 1 core, Linux 6.17, one request in flight per connection.",
+        "lat_svg": "Median latency: epoll, gnet, uringnet",
+    },
+    "zh": {
+        "suffix": "_zh", "conn": "连接",
+        "adaptive": "uringnet，自适应轮询", "nopoll": "uringnet，不轮询",
+        "tp_title": "相对 epoll 的吞吐量（越高越好）",
+        "tp_sub": "echo 服务，服务端 1 核，Linux 6.17，增量缓冲区。每个场景下方为 epoll 的每秒请求数。",
+        "tp_svg": "uringnet 相对 epoll 的吞吐量",
+        "lat_title": "低负载和中等负载下的中位延迟（越低越好）",
+        "lat_sub": "echo 服务，服务端 1 核，Linux 6.17，每个连接 1 个在途请求。",
+        "lat_svg": "中位延迟：epoll、gnet、uringnet",
     },
 }
 
@@ -71,12 +97,17 @@ def hbar(x0, y, w, h, fill, gap):
     return f'<path d="{d}" fill="{fill}" stroke="{gap}" stroke-width="1"/>'
 
 
+def text_width(s, size=12):
+    """Rough width of s in px: CJK characters are about one em wide, others about 0.55 em."""
+    return sum(size if ord(ch) > 0x2E80 else size * 0.55 for ch in s)
+
+
 def legend(x, y, items, t):
     out = []
     for name, color in items:
         out.append(f'<rect x="{x}" y="{y - 9}" width="12" height="10" rx="2" fill="{color}"/>')
         out.append(text(x + 18, y, name, t["text"]))
-        x += 18 + len(name) * 6.6 + 22
+        x += 18 + text_width(name) + 22
     return out
 
 
@@ -86,7 +117,7 @@ def svg(width, height, title, body):
             f"<title>{esc(title)}</title>" + "".join(body) + "</svg>\n")
 
 
-def throughput_chart(t):
+def throughput_chart(t, L):
     W, left, right, top = 800, 200, 50, 78
     bar, inner, pitch = 8, 2, 40
     n = len(THROUGHPUT)
@@ -94,10 +125,9 @@ def throughput_chart(t):
     xmax = 2.3
     sx = lambda v: left + v / xmax * (W - left - right)
     s = t["series"]
-    names = [("uringnet, adaptive polling", s[0]), ("gnet", s[1]), ("uringnet, no polling", s[2])]
-    b = [text(0, 20, "Throughput relative to epoll (higher is better)", t["text"], 16, weight="600"),
-         text(0, 40, "Echo server on 1 core, Linux 6.17, incremental buffers. Right column: epoll requests/s.",
-              t["muted"], 12)]
+    names = [(L["adaptive"], s[0]), ("gnet", s[1]), (L["nopoll"], s[2])]
+    b = [text(0, 20, L["tp_title"], t["text"], 16, weight="600"),
+         text(0, 40, L["tp_sub"], t["muted"], 12)]
     b += legend(0, 62, names, t)
     for v in (0.5, 1.0, 1.5, 2.0):
         x = sx(v)
@@ -108,6 +138,7 @@ def throughput_chart(t):
         b.append(text(x, top + n * pitch + 16, f"{v:.1f}×", t["muted"], 11, "middle"))
     b.append(text(sx(1.0), top + n * pitch + 32, "epoll", t["muted"], 11, "middle"))
     for i, (label, base, gnet, nopoll, adaptive) in enumerate(THROUGHPUT):
+        label = label.replace("conn", L["conn"])
         y = top + i * pitch + 4
         b.append(text(left - 12, y + 16, label, t["text"], 12, "end"))
         b.append(text(left - 12, y + 30, base, t["muted"], 10, "end"))
@@ -118,10 +149,10 @@ def throughput_chart(t):
         if i < n - 1:
             yl = top + (i + 1) * pitch - 4
             b.append(f'<line x1="0" y1="{yl}" x2="{W}" y2="{yl}" stroke="{t["grid"]}" stroke-width="0.5" opacity="0.6"/>')
-    return svg(W, H, "uringnet throughput relative to epoll", b)
+    return svg(W, H, L["tp_svg"], b)
 
 
-def latency_chart(t):
+def latency_chart(t, L):
     W, left, right, top = 800, 200, 60, 78
     bar, inner, pitch = 10, 2, 48
     n = len(LATENCY)
@@ -129,9 +160,9 @@ def latency_chart(t):
     xmax = 320
     sx = lambda v: left + v / xmax * (W - left - right)
     s = t["series"]
-    series = [("epoll", t["neutral"]), ("gnet", s[1]), ("uringnet, adaptive polling", s[0])]
-    b = [text(0, 20, "Median latency at low and medium load (lower is better)", t["text"], 16, weight="600"),
-         text(0, 40, "Echo server on 1 core, Linux 6.17, one request in flight per connection.", t["muted"], 12)]
+    series = [("epoll", t["neutral"]), ("gnet", s[1]), (L["adaptive"], s[0])]
+    b = [text(0, 20, L["lat_title"], t["text"], 16, weight="600"),
+         text(0, 40, L["lat_sub"], t["muted"], 12)]
     b += legend(0, 62, series, t)
     for v in range(0, 301, 50):
         x = sx(v)
@@ -139,6 +170,7 @@ def latency_chart(t):
                  f'stroke="{t["grid"]}" stroke-width="1"/>')
         b.append(text(x, top + n * pitch + 8, f"{v}µs", t["muted"], 11, "middle"))
     for i, (label, *vals) in enumerate(LATENCY):
+        label = label.replace("conn", L["conn"])
         y = top + i * pitch
         b.append(text(left - 12, y + 21, label, t["text"], 12, "end"))
         for j, (v, (_, c)) in enumerate(zip(vals, series)):
@@ -146,17 +178,18 @@ def latency_chart(t):
             b.append(hbar(left, yb, sx(v) - left, bar, c, t["gap"]))
             b.append(text(sx(v) + 6, yb + 9, f"{v}", t["text"] if j == 2 else t["muted"], 10,
                           weight="600" if j == 2 else "normal"))
-    return svg(W, H, "Median latency: epoll, gnet, uringnet", b)
+    return svg(W, H, L["lat_svg"], b)
 
 
 def main():
     os.makedirs(OUT, exist_ok=True)
-    for theme, t in THEMES.items():
-        for name, fn in (("bench_throughput", throughput_chart), ("bench_latency", latency_chart)):
-            path = os.path.join(OUT, f"{name}_{theme}.svg")
-            with open(path, "w") as f:
-                f.write(fn(t))
-            print(path)
+    for L in LANGS.values():
+        for theme, t in THEMES.items():
+            for name, fn in (("bench_throughput", throughput_chart), ("bench_latency", latency_chart)):
+                path = os.path.join(OUT, f"{name}{L['suffix']}_{theme}.svg")
+                with open(path, "w") as f:
+                    f.write(fn(t, L))
+                print(path)
 
 
 if __name__ == "__main__":
