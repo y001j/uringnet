@@ -12,6 +12,10 @@ func TestByteSlice(t *testing.T) {
 		t.Fatal("expect copy result is ff, but not")
 	}
 
+	if raceEnabled {
+		t.Skip("the race detector makes sync.Pool drop items at random, so the buffer may not come back")
+	}
+
 	// Disable GC to test re-acquire the same data
 	gc := debug.SetGCPercent(-1)
 
