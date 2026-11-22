@@ -50,6 +50,8 @@ type conn struct {
 	recvUD     uint64 // 在途 multishot recv 的 user_data（暂停接收时用于取消）
 	paused     bool   // 发送队列超过 MaxWriteBuffer，暂停接收
 	qBytes     int    // 发送队列中待发送的字节数
+	lastActive uint64 // 最近一次收到或发出数据时的节拍号（IdleTimeout）
+	lastSend   uint64 // 最近一次发送进展（或队列由空变为非空）时的节拍号（WriteTimeout）
 	sending    bool
 	q          []seg
 	qBase      []seg // q 的底层数组起点，队列清空后复用，避免每次入队都分配
@@ -71,7 +73,7 @@ type conn struct {
 const maxIov = 16
 
 func newConn(rn *URingNet, fd int) *conn {
-	c := &conn{rn: rn, fd: fd}
+	c := &conn{rn: rn, fd: fd, lastActive: rn.tick, lastSend: rn.tick}
 	c.ud.Fd = int32(fd)
 	c.ud.c = c
 	// 缓存方法值，避免每次提交请求都分配闭包
@@ -116,6 +118,9 @@ func (c *conn) maybeResume() {
 
 func (c *conn) onRecv(res int32, flags uint32) {
 	rn := c.rn
+	if res > 0 {
+		c.lastActive = rn.tick
+	}
 	c.batching = true
 	if rn.bundle {
 		// 一个 CQE 可能连续使用多个缓冲区，逐个交给 OnTraffic
@@ -312,6 +317,9 @@ func (c *conn) enqueue(s seg) {
 	if len(c.q) == 0 && c.qBase != nil {
 		c.q = c.qBase[:0]
 	}
+	if len(c.q) == 0 {
+		c.lastSend = rn.tick // 从这时起开始计算 WriteTimeout
+	}
 	c.q = append(c.q, s)
 	c.qBytes += len(s.b)
 	if len(c.q) == 1 {
@@ -406,6 +414,7 @@ func (c *conn) onSend(res int32, flags uint32) {
 		return
 	}
 	c.qBytes -= int(res)
+	c.lastActive, c.lastSend = c.rn.tick, c.rn.tick
 	// 按发送的字节数依次移除已发完的段；短写时停在未发完的段上
 	for remain := int(res); remain > 0; {
 		left := len(c.q[0].b) - c.off

@@ -81,6 +81,13 @@ type URingNet struct {
 	// 单次回调写入的数据不会被拒绝，所以队列可能短暂超过上限。
 	MaxWriteBuffer int
 
+	// IdleTimeout 大于 0 时，连接在这段时间内既没有收到也没有发出数据就被关闭。
+	IdleTimeout time.Duration
+
+	// WriteTimeout 大于 0 时，发送队列中有数据、但这段时间内发送没有任何进展（对端不读取）就关闭连接。
+	// 与 MaxWriteBuffer 配合，可以清理只发不读或已经失联的对端。
+	WriteTimeout time.Duration
+
 	index      int
 	entries    uint32
 	ownsSocket bool // SocketFd 是否由本实例独占（ReusePort 时每个实例一个监听 socket）
@@ -109,8 +116,14 @@ type URingNet struct {
 	pauses      int     // 因背压暂停接收的次数（测试用）
 	nopH        iouring.Handler
 
+	// 超时检查：每 tickEvery 一个节拍，连接记录最近一次活动的节拍号（粗粒度时钟，不读系统时间）
+	tick                  uint64
+	tickEvery             time.Duration
+	idleTicks, writeTicks uint64 // 超过这么多个节拍没有活动/发送进展就关闭；0 表示不检查
+
 	acceptBackoff time.Duration // accept 出错后重新提交前的等待时间，成功 accept 后清零
 	acceptArms    int           // 提交 accept 的次数（测试用）
+	timeouts      int           // 因超时关闭的连接数（测试用）
 
 	connCount atomic.Int64
 
@@ -340,6 +353,7 @@ func (rn *URingNet) start(bufferCount int) error {
 		rn.maxWrite = DefaultMaxWriteBuffer
 	}
 	rn.nopH = func(int32, uint32) {}
+	rn.setupTimeouts()
 	return nil
 }
 

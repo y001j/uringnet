@@ -209,3 +209,86 @@ func TestBackpressureBoundsQueue(t *testing.T) {
 	}
 	t.Logf("queued %d bytes while paused; %d pauses", queued, pauses)
 }
+
+// IdleTimeout：没有收发的连接在超时后被关闭；持续收发的连接不受影响
+func TestIdleTimeout(t *testing.T) {
+	const idle = 200 * time.Millisecond
+	h := &testHandler{}
+	loop, addr := startServerCfg(t, h, 1, false, 256, func(rn *URingNet) { rn.IdleTimeout = idle })
+	defer loop.Shutdown()
+
+	quiet, err := net.Dial("tcp4", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer quiet.Close()
+	busy, err := net.Dial("tcp4", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer busy.Close()
+
+	// busy 每 50ms 收发一次，持续 3 倍超时时间
+	busyErr := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 4)
+		for end := time.Now().Add(3 * idle); time.Now().Before(end); time.Sleep(50 * time.Millisecond) {
+			busy.SetDeadline(time.Now().Add(time.Second))
+			if _, err := busy.Write([]byte("ping")); err != nil {
+				busyErr <- err
+				return
+			}
+			if _, err := io.ReadFull(busy, buf); err != nil {
+				busyErr <- err
+				return
+			}
+		}
+		busyErr <- nil
+	}()
+
+	start := time.Now()
+	quiet.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if n, err := quiet.Read(make([]byte, 1)); n != 0 || err == nil {
+		t.Fatalf("expected the idle connection to be closed, got n=%d err=%v", n, err)
+	}
+	elapsed := time.Since(start)
+	// 超时后 1–1.25 倍时间内关闭；给调度留些余量
+	if elapsed < idle || elapsed > 2*idle {
+		t.Fatalf("idle connection closed after %v, want %v–%v", elapsed, idle, 2*idle)
+	}
+	if err := <-busyErr; err != nil {
+		t.Fatalf("active connection was closed: %v", err)
+	}
+	t.Logf("idle connection closed after %v", elapsed)
+}
+
+// WriteTimeout：对端不读，发送队列长时间没有进展时关闭连接
+func TestWriteTimeout(t *testing.T) {
+	const wt = 200 * time.Millisecond
+	big := make([]byte, 16<<20)
+	h := &testHandler{traffic: func(d *UserData) Action {
+		d.WriteBuf = big
+		return Write
+	}}
+	loop, addr := startServerCfg(t, h, 1, false, 256, func(rn *URingNet) { rn.WriteTimeout = wt })
+	defer loop.Shutdown()
+
+	c, err := net.Dial("tcp4", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.Write([]byte("x")) // 触发 16MB 的响应，但从不读取
+	start := time.Now()
+	waitFor(t, func() bool { return h.closed.Load() == 1 }, "close by WriteTimeout")
+	elapsed := time.Since(start)
+	if elapsed < wt {
+		t.Fatalf("closed after %v, before WriteTimeout %v", elapsed, wt)
+	}
+	var timeouts int
+	onLoop(t, loop.RingNet[0], func() { timeouts = loop.RingNet[0].timeouts })
+	if timeouts != 1 {
+		t.Fatalf("timeouts = %d", timeouts)
+	}
+	t.Logf("stalled connection closed after %v", elapsed)
+}

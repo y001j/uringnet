@@ -79,6 +79,7 @@ func (loop *Ringloop) RunMany() {
 		rn := rn
 		rn.Handler.OnBoot(rn)
 		rn.loop.Post(rn.armAccept)
+		rn.loop.Post(rn.startTimeouts)
 	}
 	loop.startTicker()
 }
