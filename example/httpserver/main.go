@@ -14,6 +14,8 @@ import (
 )
 
 // 一个最简 HTTP/1.1 服务，只用于压测：每个以 \r\n\r\n 结尾的请求回复一个固定响应。
+// 连接管理遵循 HTTP 规则：HTTP/1.1 默认长连接，带 "Connection: close" 时回复后关闭；
+// HTTP/1.0 默认回复后关闭，带 "Connection: keep-alive" 时保持（ab 不加 -k 时依赖服务端关闭连接）。
 type httpServer struct {
 	uringnet.BuiltinEventEngine
 }
@@ -25,10 +27,55 @@ type httpCodec struct {
 
 var delimiter = []byte("\r\n\r\n")
 
-func appendResponse(b []byte) []byte {
+type connMode int
+
+const (
+	modeDefault   connMode = iota // HTTP/1.1 长连接，响应里不需要 Connection 头
+	modeKeepAlive                 // HTTP/1.0 + keep-alive：响应里必须回 Connection: keep-alive
+	modeClose                     // 回复后关闭连接
+)
+
+func appendResponse(b []byte, mode connMode) []byte {
 	b = append(b, "HTTP/1.1 200 OK\r\nServer: uringNet\r\nContent-Type: text/plain\r\nDate: "...)
 	b = time.Now().UTC().AppendFormat(b, "Mon, 02 Jan 2006 15:04:05 GMT")
+	switch mode {
+	case modeKeepAlive:
+		b = append(b, "\r\nConnection: keep-alive"...)
+	case modeClose:
+		b = append(b, "\r\nConnection: close"...)
+	}
 	return append(b, "\r\nContent-Length: 12\r\n\r\nHello World!"...)
+}
+
+var (
+	http10    = []byte("HTTP/1.0")
+	connToken = []byte("onnection:") // 不区分 Connection/connection 的首字母
+)
+
+// requestMode 根据请求行的协议版本和 Connection 头决定连接如何处理。
+func requestMode(header []byte) connMode {
+	line := header
+	if i := bytes.IndexByte(header, '\r'); i >= 0 {
+		line = header[:i]
+	}
+	v10 := bytes.HasSuffix(line, http10)
+	var value []byte
+	if i := bytes.Index(header, connToken); i >= 0 {
+		value = header[i+len(connToken):]
+		if j := bytes.IndexByte(value, '\r'); j >= 0 {
+			value = value[:j]
+		}
+		value = bytes.ToLower(bytes.TrimSpace(value))
+	}
+	switch {
+	case bytes.Contains(value, []byte("close")):
+		return modeClose
+	case v10 && bytes.Contains(value, []byte("keep-alive")):
+		return modeKeepAlive
+	case v10:
+		return modeClose
+	}
+	return modeDefault
 }
 
 func (hs *httpServer) OnOpen(data *uringnet.UserData) ([]byte, uringnet.Action) {
@@ -48,7 +95,11 @@ func (hs *httpServer) OnTraffic(data *uringnet.UserData, ringnet *uringnet.URing
 		if i < 0 {
 			break
 		}
-		data.WriteBuf = appendResponse(data.WriteBuf)
+		mode := requestMode(in[:i])
+		data.WriteBuf = appendResponse(data.WriteBuf, mode)
+		if mode == modeClose {
+			return uringnet.EchoAndClose // 发送完响应后关闭，忽略之后的数据
+		}
 		in = in[i+len(delimiter):]
 	}
 	if len(in) > 64*1024 {
