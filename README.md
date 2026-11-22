@@ -12,6 +12,8 @@
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/github/license/y001j/uringnet"></a>
 </p>
 
+<p align="center">English | <a href="README_zh.md">中文</a></p>
+
 ## Introduction
 
 ### Why I created this 
