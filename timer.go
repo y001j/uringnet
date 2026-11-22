@@ -70,12 +70,14 @@ func (rn *URingNet) onTick() {
 		}
 		if rn.idleTicks > 0 && rn.tick-c.lastActive >= rn.idleTicks {
 			rn.timeouts++
-			c.close()
+			rn.log.Debug("uringnet: closing idle connection", "fd", c.fd)
+			c.fail(ErrIdleTimeout)
 			continue
 		}
 		if rn.writeTicks > 0 && len(c.q) > 0 && rn.tick-c.lastSend >= rn.writeTicks {
 			rn.timeouts++
-			c.close()
+			rn.log.Debug("uringnet: closing connection, send queue stalled", "fd", c.fd, "queued", c.qBytes)
+			c.fail(ErrWriteTimeout)
 		}
 	}
 	rn.after(rn.tickEvery, rn.onTick)

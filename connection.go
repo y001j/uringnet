@@ -4,6 +4,7 @@
 package uringnet
 
 import (
+	"io"
 	"syscall"
 	"unsafe"
 
@@ -71,6 +72,8 @@ type conn struct {
 	curBid  int32
 	curHeld bool // 当前接收缓冲区被发送队列占用，回调结束后不能归还
 
+	api Conn // 新 API 中交给回调的连接对象
+
 	onRecvH iouring.Handler
 	onSendH iouring.Handler
 }
@@ -82,6 +85,7 @@ func newConn(rn *URingNet, fd int) *conn {
 	c := &conn{rn: rn, fd: fd, lastActive: rn.tick, lastSend: rn.tick, curBid: -1}
 	c.ud.Fd = int32(fd)
 	c.ud.c = c
+	c.api.c = c
 	// 缓存方法值，避免每次提交请求都分配闭包
 	c.onRecvH = c.onRecv
 	c.onSendH = c.onSend
@@ -174,9 +178,10 @@ func (c *conn) onRecv(res int32, flags uint32) {
 		}
 	case res > 0:
 		c.armRecv()
+	case res == 0:
+		c.fail(io.EOF)
 	default:
-		// EOF（res == 0）或出错
-		c.close()
+		c.fail(syscall.Errno(-res))
 	}
 }
 
@@ -384,6 +389,7 @@ func (c *conn) zcHandler(ref *zcRef) iouring.Handler {
 			// 内核或 socket 不支持零拷贝（EOPNOTSUPP/EINVAL），或 pin 页超出 RLIMIT_MEMLOCK（ENOMEM）：
 			// 这些条件不会很快改变，关闭本实例的零拷贝，用普通 send 重发
 			c.rn.zcOff = true
+			c.rn.log.Warn("uringnet: zero-copy send unavailable, falling back to normal sends", "ring", c.rn.index, "err", syscall.Errno(-res))
 			c.sending = false
 			if !c.closed {
 				c.sendHead()
@@ -399,7 +405,11 @@ func (c *conn) onSend(res int32, flags uint32) {
 	if res <= 0 || c.closed {
 		// 出错（含 shutdown 后的 -EPIPE / -ECANCELED）
 		c.sending = false
-		c.close()
+		if res < 0 {
+			c.fail(syscall.Errno(-res))
+		} else {
+			c.fail(io.ErrShortWrite)
+		}
 		return
 	}
 	c.qBytes -= int(res)
@@ -449,6 +459,14 @@ func (c *conn) finish(s seg) {
 	default:
 		c.rn.releaseBuf(s.bid, s.release)
 	}
+}
+
+// fail 以 err 为原因关闭连接（交给 OnClose）；连接已经在关闭时保留原来的原因
+func (c *conn) fail(err error) {
+	if !c.closed && c.err == nil {
+		c.err = err
+	}
+	c.close()
 }
 
 // close 关闭连接：shutdown 让在途请求尽快结束，fd 在 maybeFree 中关闭。

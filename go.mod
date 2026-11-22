@@ -1,6 +1,6 @@
 module github.com/y001j/uringnet
 
-go 1.20
+go 1.21
 
 require golang.org/x/sys v0.12.0
 

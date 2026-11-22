@@ -1,6 +1,6 @@
 module github.com/y001j/uringnet/bench
 
-go 1.20
+go 1.21
 
 require (
 	github.com/panjf2000/gnet/v2 v2.3.3
