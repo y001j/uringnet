@@ -143,6 +143,7 @@ func main() {
 | `WithWriteTimeout(d)` | close connections whose send queue makes no progress for `d`, e.g. a peer that stopped reading |
 | `WithReusePort(on)` / `WithTCPNoDelay(on)` | one listening socket per ring with `SO_REUSEPORT` (default on) / `TCP_NODELAY` (default on) |
 | `WithTLS(cfg)` / `WithDialTLS(cfg)` | TLS for accepted / dialed connections; see *TLS* below |
+| `WithKTLS(on)` | kernel TLS after TLS 1.3 handshakes (default on; needs the `tls` module) |
 | `WithBackend(b)` | `BackendAuto` (default): io_uring, falling back to epoll when io_uring is unavailable; `BackendIOUring` or `BackendEpoll` to force one. `Server.Backend()` reports which one runs |
 | `WithLogger(*slog.Logger)` | warnings about failures the server recovers from (accept errors, zero-copy fallback) and debug messages (timeouts); silent by default |
 
@@ -202,10 +203,28 @@ srv, err := uringnet.Listen("tcp", ":9000", uringnet.Framed(framer, handler)) //
 `WithTLS(cfg)` makes accepted connections speak TLS and `WithDialTLS(cfg)` dialed ones (the dialed host is the default
 server name). Handlers see plaintext: `OnOpen` runs once the handshake has succeeded (connections whose handshake
 fails are closed without `OnOpen`/`OnClose` and counted in `Stats.TLSHandshakeErrors`), `Write` encrypts, and `Close`
-sends `close_notify`. `Conn.TLSConnectionState` reports the negotiated state. It is built on `crypto/tls`: the
-handshake runs on a goroutine of its own, then records are decrypted and encrypted on the event loop. Throughput was
-0.93–1.24x of a `crypto/tls` server for 128-byte messages and 0.8x for 16KB (server on 1 core); in-place and
-zero-copy sends do not apply to TLS.
+sends `close_notify`. `Conn.TLSConnectionState` reports the negotiated state.
+
+The handshake uses `crypto/tls` on a goroutine of its own. After a TLS 1.3 handshake (AES-GCM or ChaCha20-Poly1305)
+the traffic keys go to the kernel (**kTLS**), which encrypts and decrypts during the copies it makes anyway: no
+user-space copies or crypto, and the connection's data path is that of plain TCP, in-place sends included
+(`Conn.KernelTLS()` tells whether it applies). kTLS needs the `tls` kernel module (`modprobe tls`; unprivileged
+processes cannot load it). Without it, for TLS 1.2, or with `WithKTLS(false)`, records are processed with
+`crypto/tls` on the event loop. With kTLS a server sends no session tickets, so clients cannot resume TLS 1.3
+sessions; use `WithKTLS(false)` if you need resumption. Peers that send a TLS KeyUpdate are disconnected.
+
+Throughput relative to a `crypto/tls` server (echo, server on 1 core, arm64 VM, Linux 6.17):
+
+| Connections, size | uringnet + kTLS | uringnet, user-space TLS |
+|---|---|---|
+| 1, 128B | 1.00 | 1.01 |
+| 64, 128B | 1.03 | 1.04 |
+| 512, 128B | 1.13 | 1.17 |
+| 64, 16KB | 0.98 | 0.92 |
+| 64, 64KB | 0.90 | 0.77 |
+
+kTLS helps more as messages grow. In this VM the kernel's AES-GCM is no faster than Go's, which limits the gain;
+on machines with faster kernel crypto or NIC TLS offload it is typically larger.
 
 ### UDP
 

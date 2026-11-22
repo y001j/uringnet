@@ -4,12 +4,17 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/). Before v1.0.0, minor versions may change the API.
 
-## [Unreleased]
+## [v0.3.0] - 2026-11-22
+
+Adds an epoll fallback and TLS with kernel TLS offload. No breaking changes.
 
 ### Added
 - epoll backend: `WithBackend`, `Backend` (`BackendAuto` falls back to epoll when io_uring is unavailable, with a
   warning; `BackendIOUring`, `BackendEpoll`), `Server.Backend`, `PacketServer.Backend`.
 - TLS: `WithTLS`, `WithDialTLS`, `Conn.TLSConnectionState`, `Stats.TLSHandshakeErrors`.
+- Kernel TLS (kTLS) after TLS 1.3 handshakes: `WithKTLS` (default on), `Conn.KernelTLS`,
+  `Stats.KernelTLSConnections`. Needs the `tls` kernel module; falls back to `crypto/tls` in user space.
+  Servers using kTLS send no session tickets.
 - `docs/ARCHITECTURE.md`; all code comments are in English.
 
 ## [v0.2.0] - 2026-11-22
@@ -87,6 +92,7 @@ Pre-release of the rebuilt core with the hardening above, before the API rework.
 
 Last release of the original implementation.
 
+[v0.3.0]: https://github.com/y001j/uringnet/compare/v0.2.0...v0.3.0
 [v0.2.0]: https://github.com/y001j/uringnet/compare/v0.1.0...v0.2.0
 [v0.1.0]: https://github.com/y001j/uringnet/compare/v0.0.3-alpha...v0.1.0
 [v0.1.0-alpha]: https://github.com/y001j/uringnet/compare/v0.0.3-alpha...v0.1.0-alpha

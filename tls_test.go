@@ -16,6 +16,7 @@ import (
 	"io"
 	"math/big"
 	"net"
+	"os"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -53,6 +54,35 @@ func testCert(t *testing.T) (tls.Certificate, *x509.CertPool) {
 	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key, Leaf: cert}, pool
 }
 
+// ktlsLoaded reports whether the tls kernel module is available, i.e. whether kernel TLS should be used.
+func ktlsLoaded() bool {
+	_, err := os.Stat("/sys/module/tls")
+	return err == nil
+}
+
+// forEachKTLS runs fn with kernel TLS enabled and disabled (user-space crypto/tls).
+func forEachKTLS(t *testing.T, fn func(t *testing.T, ktls bool)) {
+	for _, ktls := range []bool{true, false} {
+		name := "userspace"
+		if ktls {
+			name = "ktls"
+		}
+		t.Run(name, func(t *testing.T) { fn(t, ktls) })
+	}
+}
+
+// checkKTLS checks that connections used kernel TLS exactly when they should.
+func checkKTLS(t *testing.T, st Stats, ktls bool, conns uint64) {
+	t.Helper()
+	want := uint64(0)
+	if ktls && ktlsLoaded() {
+		want = conns
+	}
+	if st.KernelTLSConnections != want {
+		t.Fatalf("KernelTLSConnections = %d, want %d (tls module loaded: %v)", st.KernelTLSConnections, want, ktlsLoaded())
+	}
+}
+
 // tlsEcho echoes plaintext and records what it saw.
 type tlsEcho struct {
 	apiEcho
@@ -68,10 +98,12 @@ func (h *tlsEcho) OnOpen(c *Conn) Action {
 
 // A standard library TLS client talks to a TLS server: large data stays intact, OnOpen runs after the
 // handshake, and closing sends close_notify.
-func TestTLSServer(t *testing.T) {
+func TestTLSServer(t *testing.T) { forEachKTLS(t, testTLSServer) }
+
+func testTLSServer(t *testing.T, ktls bool) {
 	cert, pool := testCert(t)
 	h := &tlsEcho{}
-	s, addr := serve(t, h, WithRings(2), WithTLS(&tls.Config{Certificates: []tls.Certificate{cert}}))
+	s, addr := serve(t, h, WithRings(2), WithTLS(&tls.Config{Certificates: []tls.Certificate{cert}}), WithKTLS(ktls))
 
 	c, err := tls.Dial("tcp4", addr, &tls.Config{RootCAs: pool, ServerName: "localhost"})
 	if err != nil {
@@ -113,6 +145,7 @@ func TestTLSServer(t *testing.T) {
 	if errs := h.closeErrs(); errs[0] != io.EOF {
 		t.Fatalf("OnClose errors %v, want [EOF]", errs)
 	}
+	checkKTLS(t, s.Stats(), ktls, 1)
 }
 
 // A failed handshake closes the connection without OnOpen/OnClose and is counted.
@@ -137,7 +170,9 @@ func TestTLSHandshakeFailure(t *testing.T) {
 }
 
 // A TLS client: dial a standard library TLS server and a uringnet TLS server.
-func TestTLSDial(t *testing.T) {
+func TestTLSDial(t *testing.T) { forEachKTLS(t, testTLSDial) }
+
+func testTLSDial(t *testing.T, ktls bool) {
 	cert, pool := testCert(t)
 	serverCfg := &tls.Config{Certificates: []tls.Certificate{cert}}
 
@@ -155,11 +190,11 @@ func TestTLSDial(t *testing.T) {
 			go io.Copy(c, c)
 		}
 	}()
-	_, ours := serve(t, &apiEcho{}, WithRings(1), WithTLS(serverCfg))
+	_, ours := serve(t, &apiEcho{}, WithRings(1), WithTLS(serverCfg), WithKTLS(ktls))
 
 	for _, addr := range []string{std.Addr().String(), ours} {
 		h := &collector{}
-		cl := newTestClient(t, h, WithRings(1), WithDialTLS(&tls.Config{RootCAs: pool}))
+		cl := newTestClient(t, h, WithRings(1), WithDialTLS(&tls.Config{RootCAs: pool}), WithKTLS(ktls))
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		c, err := cl.Dial(ctx, "tcp4", addr, nil) // ServerName defaults to 127.0.0.1, in the certificate
 		cancel()
@@ -171,6 +206,7 @@ func TestTLSDial(t *testing.T) {
 		}
 		c.AsyncWrite([]byte("over TLS"), nil)
 		waitFor(t, func() bool { return h.received() == "over TLS" }, "TLS echo")
+		checkKTLS(t, cl.Stats(), ktls, 1)
 	}
 
 	// A certificate the client does not trust: Dial fails with the handshake error
@@ -181,11 +217,13 @@ func TestTLSDial(t *testing.T) {
 }
 
 // Framing over TLS: frames are cut from the decrypted stream.
-func TestTLSFramed(t *testing.T) {
+func TestTLSFramed(t *testing.T) { forEachKTLS(t, testTLSFramed) }
+
+func testTLSFramed(t *testing.T, ktls bool) {
 	cert, pool := testCert(t)
 	lf := NewLengthField(4, binary.BigEndian, 1<<20)
 	h := &frameEcho{}
-	_, addr := serve(t, Framed(lf, h), WithRings(1), WithTLS(&tls.Config{Certificates: []tls.Certificate{cert}}))
+	_, addr := serve(t, Framed(lf, h), WithRings(1), WithTLS(&tls.Config{Certificates: []tls.Certificate{cert}}), WithKTLS(ktls))
 
 	c, err := tls.Dial("tcp4", addr, &tls.Config{RootCAs: pool, ServerName: "localhost"})
 	if err != nil {
@@ -205,4 +243,53 @@ func TestTLSFramed(t *testing.T) {
 	if !bytes.Equal(got, stream) || h.frames.Load() != 100 {
 		t.Fatalf("frames %d, data equal %v", h.frames.Load(), bytes.Equal(got, stream))
 	}
+}
+
+// TLS 1.2 is not handed to the kernel: it stays in user space and works the same.
+func TestTLS12UserSpace(t *testing.T) {
+	cert, pool := testCert(t)
+	s, addr := serve(t, &apiEcho{}, WithRings(1), WithTLS(&tls.Config{Certificates: []tls.Certificate{cert}}))
+	c, err := tls.Dial("tcp4", addr, &tls.Config{RootCAs: pool, ServerName: "localhost", MaxVersion: tls.VersionTLS12})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if v := c.ConnectionState().Version; v != tls.VersionTLS12 {
+		t.Fatalf("negotiated %x", v)
+	}
+	msg := make([]byte, 200000)
+	rand.Read(msg)
+	go c.Write(msg)
+	got := make([]byte, len(msg))
+	c.SetReadDeadline(time.Now().Add(10 * time.Second))
+	if _, err := io.ReadFull(c, got); err != nil || !bytes.Equal(got, msg) {
+		t.Fatalf("TLS 1.2 echo: %v", err)
+	}
+	if st := s.Stats(); st.KernelTLSConnections != 0 {
+		t.Fatalf("TLS 1.2 used kernel TLS: %+v", st)
+	}
+}
+
+// Client data sent right after the handshake (before the server enabled kernel TLS) must not be
+// lost: the handshake reads stop at the end of the client's Finished record.
+func TestTLSDataRightAfterHandshake(t *testing.T) {
+	forEachKTLS(t, func(t *testing.T, ktls bool) {
+		cert, pool := testCert(t)
+		_, addr := serve(t, &apiEcho{}, WithRings(1), WithTLS(&tls.Config{Certificates: []tls.Certificate{cert}}), WithKTLS(ktls))
+		for i := 0; i < 20; i++ {
+			raw, err := net.Dial("tcp4", addr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			c := tls.Client(raw, &tls.Config{RootCAs: pool, ServerName: "localhost"})
+			c.Handshake()
+			c.Write([]byte("first")) // immediately, together with the end of the handshake
+			got := make([]byte, 5)
+			c.SetReadDeadline(time.Now().Add(5 * time.Second))
+			if _, err := io.ReadFull(c, got); err != nil || string(got) != "first" {
+				t.Fatalf("connection %d: got %q, %v", i, got, err)
+			}
+			c.Close()
+		}
+	})
 }

@@ -22,7 +22,8 @@ jobs:
         go-version: ${{ matrix.go }}
 
     - name: Kernel
-      run: uname -r
+      # the tls module lets the TLS tests exercise kernel TLS (they fall back to user space without it)
+      run: uname -r && (sudo modprobe tls && echo "tls module loaded" || echo "no tls module")
 
     - name: Vet
       run: go vet ./...

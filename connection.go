@@ -179,13 +179,16 @@ func (c *conn) onRecv(res int32, flags uint32) {
 		}
 	case res > 0:
 		c.armRecv()
-	case res == 0 && c.tls != nil:
+	case res == -int32(syscall.EIO) && c.tls != nil && c.tls.rxKernel:
+		// Kernel TLS: a non-data record (alert, post-handshake message) is next; read and handle it
+		if c.tls.controlRecord() && !c.paused {
+			c.armRecv()
+		}
+	case res == 0 && c.tls != nil && !c.tls.rxKernel:
 		// TLS: deliver the records still buffered, then handle the EOF in tlsState.readDone (during
 		// the handshake, the handshake goroutine sees the EOF and fails)
 		c.tls.tr.end(io.EOF)
-		if c.tls.ready {
-			c.tls.pump()
-		}
+		c.tls.pump()
 	case res == 0:
 		// The peer shut down its write side (perhaps only half-closed, still waiting for a reply): stop receiving,
 		// send what was written, then close; if the peer is fully gone the send fails and the connection closes
@@ -217,16 +220,13 @@ func (c *conn) traffic(bid uint16, data []byte) (held bool) {
 	if len(data) == 0 || c.closed {
 		return false
 	}
-	if c.tls != nil {
-		if c.tls.ready {
-			// crypto/tls copies everything available into its own record buffer, so the receive buffer
-			// is only borrowed for the duration of pump and goes back at once
-			c.tls.tr.lend(data)
-			c.tls.pump()
-			c.tls.tr.unlend()
-		} else {
-			c.tls.tr.feed(data) // copied for the handshake goroutine
-		}
+	if c.tls != nil && !c.tls.rxKernel {
+		// User-space TLS: crypto/tls copies everything available into its own record buffer, so the
+		// receive buffer is only borrowed for the duration of pump and goes back at once. (With kernel
+		// TLS the data is already plaintext and takes the normal path, in-place sends included.)
+		c.tls.tr.lend(data)
+		c.tls.pump()
+		c.tls.tr.unlend()
 		return false
 	}
 	c.curBuf, c.curBid, c.curHeld = data, int32(bid), false
@@ -238,7 +238,7 @@ func (c *conn) traffic(bid uint16, data []byte) (held bool) {
 
 // send queues b, in place when it lies in the current receive buffer (during OnTraffic), otherwise copied.
 func (c *conn) send(b []byte) {
-	if c.tls != nil {
+	if c.tls != nil && !c.tls.txKernel {
 		c.tls.write(b)
 		return
 	}
@@ -352,7 +352,7 @@ func (c *conn) writeNoCopy(b []byte, release func()) error {
 		}
 		return nil
 	}
-	if c.tls != nil {
+	if c.tls != nil && !c.tls.txKernel {
 		c.tls.write(b) // encrypting copies b, so it is free again at once
 		if release != nil {
 			release()
@@ -365,7 +365,7 @@ func (c *conn) writeNoCopy(b []byte, release func()) error {
 
 func (c *conn) enqueue(s seg) {
 	rn := c.rn
-	if !s.copied && rn.zcEnabled() && len(s.b) >= rn.ZeroCopyThreshold {
+	if !s.copied && c.tls == nil && rn.zcEnabled() && len(s.b) >= rn.ZeroCopyThreshold { // kernel TLS cannot send zero-copy
 		s.zc = &zcRef{bid: s.bid, release: s.release}
 	}
 	if len(c.q) == 0 && c.qBase != nil {
@@ -535,6 +535,10 @@ func (c *conn) fail(err error) {
 func (c *conn) close() {
 	if !c.closed {
 		c.closed = true
+		if c.tls != nil && c.tls.notifyClose {
+			c.tls.notifyClose = false
+			c.tls.sendCloseNotify() // kernel TLS: the alert goes out after the data already sent
+		}
 		unix.Shutdown(c.fd, unix.SHUT_RDWR)
 	}
 	c.maybeFree()

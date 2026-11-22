@@ -64,6 +64,7 @@ type options struct {
 	logger         *slog.Logger
 	backend        Backend
 	tlsConfig      *tls.Config
+	noKTLS         bool
 	dialTLSConfig  *tls.Config
 }
 
@@ -133,14 +134,23 @@ func WithTCPNoDelay(on bool) Option { return func(o *options) { o.noDelay = on }
 
 // WithTLS makes accepted connections speak TLS with cfg (which needs certificates). OnOpen runs once
 // the handshake has succeeded; connections whose handshake fails are closed without OnOpen or OnClose
-// and counted in Stats.TLSHandshakeErrors. Each TLS connection runs crypto/tls on a goroutine of its
-// own, so TLS costs a goroutine switch per record and disables in-place and zero-copy sends.
+// and counted in Stats.TLSHandshakeErrors. The handshake uses crypto/tls on a goroutine of its own;
+// afterwards TLS 1.3 connections use kernel TLS when available (see WithKTLS), others crypto/tls on
+// the event loop. Zero-copy send does not apply to TLS connections.
 func WithTLS(cfg *tls.Config) Option { return func(o *options) { o.tlsConfig = cfg } }
 
 // WithDialTLS makes dialed connections (Dial, DialAsync) speak TLS as a client with cfg. Without a
 // ServerName in cfg, the host being dialed is used to verify the certificate. Dial returns once the
 // handshake has succeeded, or its error.
 func WithDialTLS(cfg *tls.Config) Option { return func(o *options) { o.dialTLSConfig = cfg } }
+
+// WithKTLS controls kernel TLS (default on). After a TLS 1.3 handshake with AES-GCM or
+// ChaCha20-Poly1305, the traffic keys go to the kernel, which then encrypts and decrypts during
+// the copies it makes anyway: no user-space copies or crypto, and the connection's data path is the
+// same as for plain TCP. It needs the tls kernel module ("modprobe tls"); otherwise, and for TLS
+// 1.2, crypto/tls runs in user space. Servers using kernel TLS send no session tickets (TLS 1.3
+// resumption is unavailable); pass false to keep them. Peers that send a TLS KeyUpdate are disconnected.
+func WithKTLS(on bool) Option { return func(o *options) { o.noKTLS = !on } }
 
 // WithBackend selects the event loop implementation (default BackendAuto: io_uring, or
 // epoll when io_uring is unavailable).
@@ -214,6 +224,7 @@ func newServer(network, address string, h Handler, opts []Option) (*Server, erro
 		rn.Backend = o.backend
 		rn.tlsServer = o.tlsConfig
 		rn.tlsClient = o.dialTLSConfig
+		rn.ktls = !o.noKTLS
 	}
 	if rings[0].SocketFd >= 0 {
 		if sa, err := unix.Getsockname(rings[0].SocketFd); err == nil {

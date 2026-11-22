@@ -132,6 +132,7 @@ func main() {
 | `WithWriteTimeout(d)` | 发送队列在 `d` 内没有任何进展（例如对端不再读取）就关闭连接 |
 | `WithReusePort(on)` / `WithTCPNoDelay(on)` | 每个 ring 一个开启 `SO_REUSEPORT` 的监听套接字（默认开启）/ `TCP_NODELAY`（默认开启） |
 | `WithTLS(cfg)` / `WithDialTLS(cfg)` | 接入 / 拨出的连接使用 TLS，见下文 *TLS* |
+| `WithKTLS(on)` | TLS 1.3 握手后使用内核 TLS（默认开启；需要 `tls` 模块） |
 | `WithBackend(b)` | `BackendAuto`（默认）：使用 io_uring，不可用时回退到 epoll；`BackendIOUring` 或 `BackendEpoll` 强制使用其中一种。`Server.Backend()` 返回实际使用的后端 |
 | `WithLogger(*slog.Logger)` | 输出服务能自行恢复的异常（accept 失败、零拷贝回退）的警告，以及超时等调试信息；默认不输出 |
 
@@ -186,9 +187,26 @@ srv, err := uringnet.Listen("tcp", ":9000", uringnet.Framed(framer, handler)) //
 
 `WithTLS(cfg)` 让接入的连接使用 TLS，`WithDialTLS(cfg)` 让拨出的连接使用 TLS（默认用拨号的主机名做服务器名校验）。回调看到的都是明文：
 `OnOpen` 在握手成功后才调用（握手失败的连接直接关闭，不调用 `OnOpen`/`OnClose`，计入 `Stats.TLSHandshakeErrors`），`Write`
-负责加密，`Close` 会发送 `close_notify`。`Conn.TLSConnectionState` 返回协商结果。实现基于 `crypto/tls`：握手在单独的 goroutine
-中完成，之后的加解密都在事件循环里进行。压测中 128 字节消息的吞吐是 `crypto/tls` 服务端的 0.93–1.24 倍，16KB 消息是 0.8 倍
-（服务端 1 核）；TLS 连接不使用原地发送和零拷贝。
+负责加密，`Close` 会发送 `close_notify`。`Conn.TLSConnectionState` 返回协商结果。
+
+握手使用 `crypto/tls`，在单独的 goroutine 中完成。TLS 1.3 握手（AES-GCM 或 ChaCha20-Poly1305）之后，流量密钥交给内核（**kTLS**），
+由内核在它本来就要做的拷贝中顺便完成加解密：用户态没有额外拷贝，也不用跑加解密，连接的收发路径和普通 TCP 完全一样，原地发送
+也可以用（`Conn.KernelTLS()` 返回是否启用）。kTLS 需要内核的 `tls` 模块（`modprobe tls`；普通权限的进程不能自动加载它）。
+没有这个模块、使用 TLS 1.2、或者设置了 `WithKTLS(false)` 时，改在事件循环里用 `crypto/tls` 处理记录。启用 kTLS 的服务端不发送
+会话票据，客户端无法恢复 TLS 1.3 会话；需要会话恢复时请用 `WithKTLS(false)`。对端发送 TLS KeyUpdate 时会断开连接。
+
+相对 `crypto/tls` 服务端的吞吐（echo，服务端 1 核，arm64 虚拟机，Linux 6.17）：
+
+| 连接数, 消息大小 | uringnet + kTLS | uringnet，用户态 TLS |
+|---|---|---|
+| 1, 128B | 1.00 | 1.01 |
+| 64, 128B | 1.03 | 1.04 |
+| 512, 128B | 1.13 | 1.17 |
+| 64, 16KB | 0.98 | 0.92 |
+| 64, 64KB | 0.90 | 0.77 |
+
+消息越大，kTLS 的收益越明显。这台虚拟机上内核的 AES-GCM 并不比 Go 的实现快，限制了收益；在内核加解密更快或网卡支持 TLS
+卸载的机器上，收益通常更大。
 
 ### UDP
 
