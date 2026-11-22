@@ -47,6 +47,11 @@ type conn struct {
 	fd int
 
 	recvActive bool
+	recvUD     uint64 // 在途 multishot recv 的 user_data（暂停接收时用于取消）
+	paused     bool   // 发送队列超过 MaxWriteBuffer，暂停接收
+	qBytes     int    // 发送队列中待发送的字节数
+	lastActive uint64 // 最近一次收到或发出数据时的节拍号（IdleTimeout）
+	lastSend   uint64 // 最近一次发送进展（或队列由空变为非空）时的节拍号（WriteTimeout）
 	sending    bool
 	q          []seg
 	qBase      []seg // q 的底层数组起点，队列清空后复用，避免每次入队都分配
@@ -68,7 +73,7 @@ type conn struct {
 const maxIov = 16
 
 func newConn(rn *URingNet, fd int) *conn {
-	c := &conn{rn: rn, fd: fd}
+	c := &conn{rn: rn, fd: fd, lastActive: rn.tick, lastSend: rn.tick}
 	c.ud.Fd = int32(fd)
 	c.ud.c = c
 	// 缓存方法值，避免每次提交请求都分配闭包
@@ -80,14 +85,42 @@ func newConn(rn *URingNet, fd int) *conn {
 func (c *conn) armRecv() {
 	c.recvActive = true
 	if c.rn.bundle {
-		c.rn.loop.RecvMultishotBundle(c.fd, c.rn.br, 0, c.onRecvH)
+		c.recvUD = c.rn.loop.RecvMultishotBundle(c.fd, c.rn.br, 0, c.onRecvH)
 	} else {
-		c.rn.loop.RecvMultishot(c.fd, c.rn.br, 0, c.onRecvH)
+		c.recvUD = c.rn.loop.RecvMultishot(c.fd, c.rn.br, 0, c.onRecvH)
+	}
+}
+
+// checkBackpressure 在回调结束后检查发送队列：超过上限时暂停接收（取消 multishot recv）。
+// 取消完成前已经收到的数据仍会交给 OnTraffic。
+func (c *conn) checkBackpressure() {
+	max := c.rn.maxWrite
+	if max <= 0 || c.paused || c.closed || c.qBytes <= max {
+		return
+	}
+	c.paused = true
+	c.rn.pauses++
+	if c.recvActive {
+		c.rn.loop.Cancel(c.recvUD, c.rn.nopH)
+	}
+}
+
+// maybeResume 在发送取得进展后调用：队列降到上限的一半以下时恢复接收
+func (c *conn) maybeResume() {
+	if !c.paused || c.qBytes > c.rn.maxWrite/2 {
+		return
+	}
+	c.paused = false
+	if !c.recvActive && !c.closed {
+		c.armRecv()
 	}
 }
 
 func (c *conn) onRecv(res int32, flags uint32) {
 	rn := c.rn
+	if res > 0 {
+		c.lastActive = rn.tick
+	}
 	c.batching = true
 	if rn.bundle {
 		// 一个 CQE 可能连续使用多个缓冲区，逐个交给 OnTraffic
@@ -110,6 +143,7 @@ func (c *conn) onRecv(res int32, flags uint32) {
 	}
 	c.batching = false
 	c.flush()
+	c.checkBackpressure()
 	if flags&iouring_syscall.IORING_CQE_F_MORE != 0 {
 		return
 	}
@@ -119,6 +153,11 @@ func (c *conn) onRecv(res int32, flags uint32) {
 	switch {
 	case c.closed:
 		c.maybeFree()
+	case c.paused && (res > 0 || res == -int32(syscall.ECANCELED) || res == -int32(syscall.ENOBUFS)):
+		// 背压暂停中：发送队列降下来后由 maybeResume 重新提交
+	case res == -int32(syscall.ECANCELED):
+		// 为暂停而取消，但取消完成前暂停已经解除
+		c.armRecv()
 	case res == -int32(syscall.ENOBUFS):
 		// 缓冲区暂时耗尽。若有缓冲区被在途 send 占用，等它归还后再重新提交；
 		// 否则所有已处理的缓冲区都已归还，下一次 io_uring_enter 会先发布再提交，可立即重试。
@@ -240,6 +279,7 @@ func (c *conn) write(b []byte) {
 		last := &c.q[n-1]
 		if last.copied && n-1 >= c.inflight {
 			last.b = append(last.b, b...)
+			c.qBytes += len(b)
 			return
 		}
 	}
@@ -277,7 +317,11 @@ func (c *conn) enqueue(s seg) {
 	if len(c.q) == 0 && c.qBase != nil {
 		c.q = c.qBase[:0]
 	}
+	if len(c.q) == 0 {
+		c.lastSend = rn.tick // 从这时起开始计算 WriteTimeout
+	}
 	c.q = append(c.q, s)
+	c.qBytes += len(s.b)
 	if len(c.q) == 1 {
 		c.qBase = c.q // 从空队列开始时 q 位于底层数组起点
 	}
@@ -369,6 +413,8 @@ func (c *conn) onSend(res int32, flags uint32) {
 		c.close()
 		return
 	}
+	c.qBytes -= int(res)
+	c.lastActive, c.lastSend = c.rn.tick, c.rn.tick
 	// 按发送的字节数依次移除已发完的段；短写时停在未发完的段上
 	for remain := int(res); remain > 0; {
 		left := len(c.q[0].b) - c.off
@@ -380,6 +426,7 @@ func (c *conn) onSend(res int32, flags uint32) {
 		c.popHead()
 		c.off = 0
 	}
+	c.maybeResume()
 	if len(c.q) > 0 {
 		c.sendHead()
 		return
@@ -510,7 +557,7 @@ func (rn *URingNet) rearmStarved(all bool) {
 		c := rn.starved[0]
 		rn.starved[0] = nil
 		rn.starved = rn.starved[1:]
-		if c.closed || c.recvActive {
+		if c.closed || c.recvActive || c.paused {
 			continue
 		}
 		c.armRecv()

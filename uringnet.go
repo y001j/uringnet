@@ -22,6 +22,9 @@ import (
 // DefaultBufferSize 是 provided buffer ring 中单个接收缓冲区的默认大小
 const DefaultBufferSize = 16384
 
+// DefaultMaxWriteBuffer 是每个连接发送队列的默认上限，见 URingNet.MaxWriteBuffer
+const DefaultMaxWriteBuffer = 4 << 20
+
 var errConnClosed = stderrors.New("uringnet: connection closed")
 
 // URingNet 是一个 io_uring 事件循环实例。
@@ -72,6 +75,19 @@ type URingNet struct {
 	// 缓冲区数量。启用后不使用 recv bundle；内核不支持时自动退回普通模式。
 	IncrementalBuffers bool
 
+	// MaxWriteBuffer 为每个连接发送队列中待发送字节数的上限（背压）。超过时暂停接收该连接的数据
+	// （不再调用 OnTraffic），队列降到一半以下时恢复。这样不读数据的对端不会让服务端无限缓存：
+	// 接收暂停后对端的发送也会被 TCP 流控挡住。0 表示使用 DefaultMaxWriteBuffer，负数表示不限制。
+	// 单次回调写入的数据不会被拒绝，所以队列可能短暂超过上限。
+	MaxWriteBuffer int
+
+	// IdleTimeout 大于 0 时，连接在这段时间内既没有收到也没有发出数据就被关闭。
+	IdleTimeout time.Duration
+
+	// WriteTimeout 大于 0 时，发送队列中有数据、但这段时间内发送没有任何进展（对端不读取）就关闭连接。
+	// 与 MaxWriteBuffer 配合，可以清理只发不读或已经失联的对端。
+	WriteTimeout time.Duration
+
 	index      int
 	entries    uint32
 	ownsSocket bool // SocketFd 是否由本实例独占（ReusePort 时每个实例一个监听 socket）
@@ -96,6 +112,18 @@ type URingNet struct {
 	incDone     []bool  // 增量消费：内核已用完该缓冲区
 	incPinned   int     // 增量消费：有片段引用的缓冲区数量
 	gatherSends int     // sendmsg 聚集发送次数（测试用）
+	maxWrite    int     // 生效的 MaxWriteBuffer，<= 0 表示不限制
+	pauses      int     // 因背压暂停接收的次数（测试用）
+	nopH        iouring.Handler
+
+	// 超时检查：每 tickEvery 一个节拍，连接记录最近一次活动的节拍号（粗粒度时钟，不读系统时间）
+	tick                  uint64
+	tickEvery             time.Duration
+	idleTicks, writeTicks uint64 // 超过这么多个节拍没有活动/发送进展就关闭；0 表示不检查
+
+	acceptBackoff time.Duration // accept 出错后重新提交前的等待时间，成功 accept 后清零
+	acceptArms    int           // 提交 accept 的次数（测试用）
+	timeouts      int           // 因超时关闭的连接数（测试用）
 
 	connCount atomic.Int64
 
@@ -320,6 +348,12 @@ func (rn *URingNet) start(bufferCount int) error {
 		(rn.RecvBundle == BundleOn || (rn.RecvBundle == BundleAuto && bundleSafeKernel()))
 	rn.fixedIdx = rn.br.FixedIndex()
 	rn.conns = make(map[int]*conn)
+	rn.maxWrite = rn.MaxWriteBuffer
+	if rn.maxWrite == 0 {
+		rn.maxWrite = DefaultMaxWriteBuffer
+	}
+	rn.nopH = func(int32, uint32) {}
+	rn.setupTimeouts()
 	return nil
 }
 
@@ -336,22 +370,45 @@ func (rn *URingNet) Post(fn func()) error {
 
 // ---- Loop 线程 ----
 
+// accept 出错后的退避时间：从 acceptBackoffMin 开始每次翻倍，最多 acceptBackoffMax
+const (
+	acceptBackoffMin = 5 * time.Millisecond
+	acceptBackoffMax = time.Second
+)
+
 func (rn *URingNet) armAccept() {
+	if rn.stopping {
+		return
+	}
+	rn.acceptArms++
 	rn.loop.AcceptMultishot(rn.SocketFd, unix.SOCK_CLOEXEC, rn.onAccept)
 }
 
 func (rn *URingNet) onAccept(res int32, flags uint32) {
 	if res >= 0 {
+		rn.acceptBackoff = 0
 		if rn.stopping {
 			unix.Close(int(res))
 		} else {
 			rn.openConn(int(res))
 		}
 	}
-	if flags&iouring_syscall.IORING_CQE_F_MORE == 0 && !rn.stopping {
-		// multishot accept 已终止（出错，如 EMFILE），重新提交
-		rn.armAccept()
+	if flags&iouring_syscall.IORING_CQE_F_MORE != 0 || rn.stopping {
+		return
 	}
+	// multishot accept 已终止
+	if res >= 0 {
+		rn.armAccept()
+		return
+	}
+	// 出错终止（如 EMFILE/ENFILE：fd 用完）。立即重新提交通常会马上再次失败，形成空转，
+	// 所以等一段时间再提交，连续失败时等待时间翻倍；连接仍留在监听队列中，恢复后会被 accept。
+	if rn.acceptBackoff == 0 {
+		rn.acceptBackoff = acceptBackoffMin
+	} else if rn.acceptBackoff *= 2; rn.acceptBackoff > acceptBackoffMax {
+		rn.acceptBackoff = acceptBackoffMax
+	}
+	rn.after(rn.acceptBackoff, rn.armAccept)
 }
 
 func (rn *URingNet) openConn(fd int) {
@@ -367,7 +424,8 @@ func (rn *URingNet) openConn(fd int) {
 	c.handleAction(action, nil, -1)
 	c.batching = false
 	c.flush()
-	if !c.closed {
+	c.checkBackpressure()
+	if !c.closed && !c.paused {
 		c.armRecv()
 	}
 }
