@@ -6,8 +6,14 @@ Usage (from the repo root):  python3 docs/images/make_logo.py docs/images
 import math, sys
 out = sys.argv[1]
 FONT = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif"
-A = (0x1b, 0xaf, 0x7a); B = (0x2a, 0x78, 0xd6)
-def mix(t): return "#%02x%02x%02x" % tuple(round(a + (b - a) * t) for a, b in zip(A, B))
+# Warm to cool: the right arm (t=0) is orange, the left arm (t=1) blue. Going through magenta and
+# violet instead of mixing orange and blue directly keeps the middle from turning grey.
+STOPS = ["#f08c24", "#e8553a", "#d6487e", "#8e4fd6", "#2a78d6"]
+def _rgb(h): return tuple(int(h[i:i + 2], 16) for i in (1, 3, 5))
+def mix(t):
+    x = t * (len(STOPS) - 1); i = min(int(x), len(STOPS) - 2); f = x - i
+    a, b = _rgb(STOPS[i]), _rgb(STOPS[i + 1])
+    return "#%02x%02x%02x" % tuple(round(u + (v - u) * f) for u, v in zip(a, b))
 def pt(cx, cy, r, deg):
     a = math.radians(deg - 90); return cx + r * math.cos(a), cy + r * math.sin(a)
 def seg(cx, cy, ro, ri, a0, a1):
@@ -32,7 +38,7 @@ def logo(theme):
     muted = "#59636e" if theme == "light" else "#9198a1"
     W, H = 460, 120
     p = mark(60, 60, 1.0, empty)
-    p.append(f'<text x="124" y="74" font-family="{FONT}" font-size="50" font-weight="700" letter-spacing="-1" fill="{text}">Uring<tspan fill="{mix(1)}">Net</tspan></text>')
+    p.append(f'<text x="124" y="74" font-family="{FONT}" font-size="50" font-weight="700" letter-spacing="-1" fill="{text}">Uring<tspan fill="{mix(0.25)}">Net</tspan></text>')
     p.append(f'<text x="126" y="99" font-family="{FONT}" font-size="14.5" fill="{muted}" letter-spacing="0.3">io_uring networking for Go</text>')
     return (f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" viewBox="0 0 {W} {H}" role="img" aria-label="UringNet">'
             f'<title>UringNet</title>' + "".join(p) + "</svg>\n")
