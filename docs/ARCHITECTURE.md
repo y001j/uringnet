@@ -179,6 +179,16 @@ A TLS connection (`WithTLS`, `WithDialTLS`) is handled in `tls.go` in two phases
 
 Backpressure and timeouts work as for plain connections.
 
+## MQTT broker
+
+`mqtt` runs on the public API: `Framed` with an MQTT framer (remaining-length varint) cuts packets, and a `handler`
+implements the protocol. Sessions live in a map by client ID; each has a mutex because publishers on other rings
+deliver to it. Subscriptions are a trie with one level per node, matched under a read lock. Delivery writes
+directly when the subscriber shares the publisher's ring (`Conn.SameLoop`) and posts to the subscriber's ring
+otherwise (`Conn.Post`), where QoS 0 is dropped if the subscriber's unsent data exceeds `MaxClientBuffer`; a QoS 0
+packet is encoded once and shared read-only by all subscribers. QoS 1 per session has an inflight window and a
+queue, resent with DUP after a reconnect. A goroutine enforces CONNECT and keepalive timeouts.
+
 ## The epoll backend
 
 When io_uring is unavailable (kernel before 6.0, blocked by seccomp, `kernel.io_uring_disabled`), `BackendAuto`

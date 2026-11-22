@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/). Before v1.0.0, minor versions may change the API.
 
+## [Unreleased]
+
+### Added
+- `mqtt` package: an MQTT 3.1.1 broker (QoS 0–2 from publishers, wildcards, retained messages, wills, persistent
+  sessions, takeover, keepalive, authentication and authorization hooks, `OnPublish`, `Publish`, `Stats`), and
+  `example/mqttbroker`. 1.75–2.67x the throughput of Mosquitto 2.0.22 on one core in three scenarios.
+- `Conn.SameLoop` and `Conn.Post`.
+
 ## [v0.4.0] - 2026-11-23
 
 Closes gaps with gnet and the standard library found in a comparison. No breaking changes.

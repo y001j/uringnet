@@ -39,7 +39,7 @@ io_uring 带来的是少得多的系统调用（高负载下每个请求低至 0
 
 ### 是否适合你的项目
 
-UringNet 是为物联网网关设计的：连接多、消息小、请求/响应式的流量。它支持 TCP、Unix 流式套接字和 UDP、TLS，以及拨出连接和消息分帧。满足以下条件时可以考虑使用：
+UringNet 是为物联网网关设计的：连接多、消息小、请求/响应式的流量。它支持 TCP、Unix 流式套接字和 UDP、TLS，以及拨出连接、消息分帧和 MQTT broker。满足以下条件时可以考虑使用：
 
 - 运行 Linux 6.0+（recv bundle 需要 6.16+），并且主机允许使用 io_uring（Docker 和 Kubernetes 默认的 seccomp 配置会禁用它；没有 io_uring 时会回退到 epoll，能运行，但失去了大部分优势）；
 - 你在意延迟或系统调用开销，并且能为忙轮询留出一些 CPU。
@@ -221,6 +221,32 @@ srv, err := uringnet.Listen("tcp", ":9000", uringnet.Framed(framer, handler)) //
 会被丢弃并计入 `Stats.PacketsTruncated`。绑定端口 0 并用 `Start` 启动时，`PacketServer` 也可以当作 UDP 客户端使用。
 地址是组播地址时（如 `ListenPacket("udp4", "239.1.2.3:5000", h)`）会自动加入该组播组，网卡由 `WithMulticastInterface` 指定，默认由系统选择；
 此时所有 ring 共用一个 socket，每个数据报只投递一次。
+
+### MQTT broker
+
+`mqtt` 包是一个面向物联网网关的 MQTT 3.1.1 broker：设备连上来发布消息，同一进程里的应用能拿到每一条消息（`OnPublish`），也能向设备下发
+命令（`Publish`）。支持发布端的 QoS 0、1、2（QoS 2 保证只投递一次）、通配符 `+` 和 `#`、保留消息、遗嘱消息、持久会话（设备离线期间 QoS 1
+消息排队，重连后补发）、会话接管和 keepalive 超时，并提供认证和发布/订阅授权的回调。订阅最高授予 QoS 1；状态只保存在内存里；MQTT 5 客户端会收到
+“不支持的协议版本”。慢订阅者不会让 broker 无限缓存：QoS 1 受在途窗口和队列长度限制，QoS 0 在超过 `MaxClientBuffer` 时丢弃。
+
+```go
+broker := mqtt.NewBroker(mqtt.Config{
+	OnPublish: func(m *mqtt.Message) { /* m.ClientID, m.Topic, m.Payload */ },
+})
+srv, err := uringnet.Listen("tcp", ":1883", broker.Handler(), uringnet.WithTLS(cfg) /* 可选 */)
+go srv.Serve()
+broker.Publish("devices/42/cmd", []byte("reboot"), 1, false)
+```
+
+和 Mosquitto 2.0.22 的对比（都绑定 1 个核，发布者用 QoS 1 并等待每个 PUBACK，负载 64 字节）：
+
+| 场景 | uringnet `mqtt` | Mosquitto | 倍数 |
+|---|---|---|---|
+| 100 个发布者 → 1 个订阅者 | 21.3 万条/秒 | 11.9 万条/秒 | 1.79 |
+| 10 个发布者 → 100 个订阅者（扇出） | 每秒投递 135 万条 | 每秒投递 50.7 万条 | 2.67 |
+| 1000 个发布者，无订阅者 | 31.4 万条/秒 | 17.9 万条/秒 | 1.75 |
+
+与 `mosquitto_pub`/`mosquitto_sub` 客户端互通（QoS 0–2、保留消息、遗嘱、持久会话）。`example/mqttbroker` 是一个可以直接运行的 broker。
 
 ### 接收缓冲区的数量
 

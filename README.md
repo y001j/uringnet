@@ -46,7 +46,7 @@ submits a whole batch of requests and waits for a batch of results.
 ### Should You adopt it in your project
 
 UringNet was designed for IoT gateways: many connections, small messages, request/response traffic. It provides TCP, Unix
-stream sockets and UDP, TLS, outgoing connections and message framing. Consider it if:
+stream sockets and UDP, TLS, outgoing connections, message framing and an MQTT broker. Consider it if:
 
 - you run Linux 6.0+ (6.16+ for recv bundles) and io_uring is allowed on the host (it is blocked by Docker's and Kubernetes'
   default seccomp profiles; without io_uring uringnet falls back to epoll, which works but loses most of the advantage), and
@@ -240,6 +240,37 @@ buffer must hold a whole datagram plus about 48 bytes; larger datagrams are drop
 `Stats.PacketsTruncated`. Bound to port 0 and started with `Start`, a `PacketServer` also works as a UDP client.
 With a multicast address (`ListenPacket("udp4", "239.1.2.3:5000", h)`) the group is joined, on the interface given by
 `WithMulticastInterface` or the system default, and the rings share one socket so each datagram is delivered once.
+
+### MQTT broker
+
+The `mqtt` package is an MQTT 3.1.1 broker for IoT gateways: devices connect and publish, and the application in
+the same process receives every message (`OnPublish`) and sends commands to devices (`Publish`). It supports QoS 0,
+1 and 2 from publishers (QoS 2 is delivered exactly once), wildcards `+` and `#`, retained messages, wills,
+persistent sessions (QoS 1 queued while a device is offline and resent after a reconnect), session takeover and
+keepalive timeouts, with hooks for authentication and publish/subscribe authorization. Subscriptions are granted at
+most QoS 1; state is kept in memory; MQTT 5 clients are refused with "unsupported protocol version". Slow
+subscribers cannot make it buffer without limit: QoS 1 is bounded by the inflight window and queue, QoS 0 is dropped
+above `MaxClientBuffer`.
+
+```go
+broker := mqtt.NewBroker(mqtt.Config{
+	OnPublish: func(m *mqtt.Message) { /* m.ClientID, m.Topic, m.Payload */ },
+})
+srv, err := uringnet.Listen("tcp", ":1883", broker.Handler(), uringnet.WithTLS(cfg) /* optional */)
+go srv.Serve()
+broker.Publish("devices/42/cmd", []byte("reboot"), 1, false)
+```
+
+Against Mosquitto 2.0.22 (both on 1 core, QoS 1 publishers waiting for each PUBACK, 64-byte payloads):
+
+| Scenario | uringnet `mqtt` | Mosquitto | Ratio |
+|---|---|---|---|
+| 100 publishers → 1 subscriber | 213k msg/s | 119k msg/s | 1.79 |
+| 10 publishers → 100 subscribers (fan-out) | 1.35M deliveries/s | 507k deliveries/s | 2.67 |
+| 1000 publishers, no subscriber | 314k msg/s | 179k msg/s | 1.75 |
+
+It interoperates with the `mosquitto_pub`/`mosquitto_sub` clients (QoS 0–2, retained, wills, persistent sessions).
+`example/mqttbroker` is a runnable broker.
 
 ### Sizing receive buffers
 

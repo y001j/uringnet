@@ -216,6 +216,11 @@ func (cn *Conn) AsyncWrite(b []byte, done func(error)) error {
 	})
 }
 
+// Post runs fn on the connection's event loop, where fn may call the methods that are restricted
+// to it (Write, Buffered, Close, ...). It is safe to call from any goroutine; fn must not block.
+// After the connection is closed fn still runs, and Write then returns ErrConnClosed.
+func (cn *Conn) Post(fn func()) error { return cn.c.rn.Post(fn) }
+
 // AsyncClose closes the connection from its event loop, like Close. It is safe to call
 // from any goroutine.
 func (cn *Conn) AsyncClose() error {
@@ -230,6 +235,10 @@ func (cn *Conn) TLSConnectionState() (state tls.ConnectionState, ok bool) {
 	}
 	return cn.c.tls.tc.ConnectionState(), true
 }
+
+// SameLoop reports whether cn and other belong to the same event loop. From a callback of one of
+// them, the other can then be written to directly with Write; otherwise use AsyncWrite.
+func (cn *Conn) SameLoop(other *Conn) bool { return other != nil && cn.c.rn == other.c.rn }
 
 // KernelTLS reports whether the kernel encrypts and decrypts this TLS connection (see WithKTLS).
 func (cn *Conn) KernelTLS() bool { return cn.c.tls != nil && cn.c.tls.rxKernel }
