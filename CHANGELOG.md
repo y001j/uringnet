@@ -10,6 +10,14 @@ All notable changes to this project are documented here. The format follows
 - `mqtt` package: an MQTT 3.1.1 broker (QoS 0–2 from publishers, wildcards, retained messages, wills, persistent
   sessions, takeover, keepalive, authentication and authorization hooks, `OnPublish`, `Publish`, `Stats`), and
   `example/mqttbroker`. 1.75–2.67x the throughput of Mosquitto 2.0.22 on one core in three scenarios.
+- `mqtt`: MQTT 5 alongside 3.1.1, with clients of both versions talking to each other: properties, reason codes
+  on acknowledgements and server-initiated DISCONNECTs, session and message expiry, user and other message
+  properties forwarded to MQTT 5 subscribers, topic aliases, receive maximum, maximum packet size, assigned client
+  IDs, subscription options (No Local, Retain As Published, Retain Handling), will delay. Shared subscriptions,
+  subscription identifiers and enhanced authentication are refused with their reason codes. New
+  `Broker.PublishMessage`, `Message.Expiry`, `Message.Properties`, `Stats.MessagesExpired`, `Stats.SessionsExpired`.
+- `mqtt`: `Config.SessionExpiry` removes sessions offline for longer (MQTT 3.1.1 persistent sessions never expired
+  before) and caps the expiry MQTT 5 clients ask for; `Config.TopicAliasMaximum`.
 - `Conn.SameLoop` and `Conn.Post`.
 
 ## [v0.4.0] - 2026-11-23

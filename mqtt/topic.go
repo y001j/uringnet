@@ -52,41 +52,44 @@ func matchFilter(filter, topic string) bool {
 	return len(f) == len(t)
 }
 
-// subscriptions maps filters to subscribers (K, a session in the broker): a trie with one level per node.
-type subscriptions[K comparable] struct {
+// subscriptions maps filters to subscribers (K, a session in the broker) with a value per
+// subscription (V, its options): a trie with one level per node.
+type subscriptions[K comparable, V any] struct {
 	mu   sync.RWMutex
-	root *node[K]
+	root *node[K, V]
 	n    int
 }
 
-type node[K comparable] struct {
-	children map[string]*node[K]
-	subs     map[K]byte // subscriber -> granted QoS
+type node[K comparable, V any] struct {
+	children map[string]*node[K, V]
+	subs     map[K]V
 }
 
-func newSubscriptions[K comparable]() *subscriptions[K] { return &subscriptions[K]{root: &node[K]{}} }
+func newSubscriptions[K comparable, V any]() *subscriptions[K, V] {
+	return &subscriptions[K, V]{root: &node[K, V]{}}
+}
 
 // add subscribes s to filter with qos; it reports whether the subscription is new.
-func (t *subscriptions[K]) add(filter string, s K, qos byte) bool {
+func (t *subscriptions[K, V]) add(filter string, s K, v V) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	n := t.root
 	for _, l := range strings.Split(filter, "/") {
 		if n.children == nil {
-			n.children = make(map[string]*node[K])
+			n.children = make(map[string]*node[K, V])
 		}
 		next := n.children[l]
 		if next == nil {
-			next = &node[K]{}
+			next = &node[K, V]{}
 			n.children[l] = next
 		}
 		n = next
 	}
 	if n.subs == nil {
-		n.subs = make(map[K]byte)
+		n.subs = make(map[K]V)
 	}
 	_, existed := n.subs[s]
-	n.subs[s] = qos
+	n.subs[s] = v
 	if !existed {
 		t.n++
 	}
@@ -94,25 +97,25 @@ func (t *subscriptions[K]) add(filter string, s K, qos byte) bool {
 }
 
 // remove unsubscribes s from filter.
-func (t *subscriptions[K]) remove(filter string, s K) {
+func (t *subscriptions[K, V]) remove(filter string, s K) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.removeLocked(filter, s)
+	return t.removeLocked(filter, s)
 }
 
-func (t *subscriptions[K]) removeLocked(filter string, s K) {
-	path := []*node[K]{t.root}
+func (t *subscriptions[K, V]) removeLocked(filter string, s K) bool {
+	path := []*node[K, V]{t.root}
 	levels := strings.Split(filter, "/")
 	n := t.root
 	for _, l := range levels {
 		n = n.children[l]
 		if n == nil {
-			return
+			return false
 		}
 		path = append(path, n)
 	}
 	if _, ok := n.subs[s]; !ok {
-		return
+		return false
 	}
 	delete(n.subs, s)
 	t.n--
@@ -124,24 +127,26 @@ func (t *subscriptions[K]) removeLocked(filter string, s K) {
 		}
 		delete(path[i].children, levels[i])
 	}
+	return true
 }
 
-// match calls fn for every session subscribed to a filter matching topic, with the highest
-// granted QoS among its matching subscriptions.
-func (t *subscriptions[K]) match(topic string, fn func(s K, qos byte)) {
+// match calls fn once for every subscriber with a filter matching topic. A subscriber with several
+// matching subscriptions gets their values combined with merge.
+func (t *subscriptions[K, V]) match(topic string, merge func(a, b V) V, fn func(s K, v V)) {
 	t.mu.RLock()
-	found := make(map[K]byte)
+	found := make(map[K]V)
 	levels := strings.Split(topic, "/")
 	dollar := strings.HasPrefix(topic, "$")
-	var walk func(n *node[K], i int)
-	collect := func(n *node[K]) {
-		for s, q := range n.subs {
-			if old, ok := found[s]; !ok || q > old {
-				found[s] = q
+	var walk func(n *node[K, V], i int)
+	collect := func(n *node[K, V]) {
+		for s, v := range n.subs {
+			if old, ok := found[s]; ok {
+				v = merge(old, v)
 			}
+			found[s] = v
 		}
 	}
-	walk = func(n *node[K], i int) {
+	walk = func(n *node[K, V], i int) {
 		if i == len(levels) {
 			collect(n)
 			if hash := n.children["#"]; hash != nil { // "a/#" also matches "a"
@@ -164,12 +169,12 @@ func (t *subscriptions[K]) match(topic string, fn func(s K, qos byte)) {
 	}
 	walk(t.root, 0)
 	t.mu.RUnlock()
-	for s, q := range found {
-		fn(s, q)
+	for s, v := range found {
+		fn(s, v)
 	}
 }
 
-func (t *subscriptions[K]) count() int {
+func (t *subscriptions[K, V]) count() int {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	return t.n

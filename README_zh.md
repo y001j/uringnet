@@ -224,13 +224,21 @@ srv, err := uringnet.Listen("tcp", ":9000", uringnet.Framed(framer, handler)) //
 
 ### MQTT broker
 
-`mqtt` 包是一个面向物联网网关的 MQTT 3.1.1 broker：设备连上来发布消息，同一进程里的应用能拿到每一条消息（`OnPublish`），也能向设备下发
-命令（`Publish`）。支持发布端的 QoS 0、1、2（QoS 2 保证只投递一次）、通配符 `+` 和 `#`、保留消息、遗嘱消息、持久会话（设备离线期间 QoS 1
-消息排队，重连后补发）、会话接管和 keepalive 超时，并提供认证和发布/订阅授权的回调。订阅最高授予 QoS 1；状态只保存在内存里；MQTT 5 客户端会收到
-“不支持的协议版本”。慢订阅者不会让 broker 无限缓存：QoS 1 受在途窗口和队列长度限制，QoS 0 在超过 `MaxClientBuffer` 时丢弃。
+`mqtt` 包是一个面向物联网网关的 MQTT broker：设备连上来发布消息，同一进程里的应用能拿到每一条消息（`OnPublish`），也能向设备下发命令
+（`Publish`）。它支持 **MQTT 5 和 3.1.1**（以及 3.1），不同版本的客户端之间可以互相收发。支持发布端的 QoS 0、1、2（QoS 2 保证只投递一次）、
+通配符 `+` 和 `#`、保留消息、遗嘱消息、持久会话（设备离线期间 QoS 1 消息排队，重连后补发）和**会话过期**、会话接管、keepalive 超时，并提供认证和
+发布/订阅授权的回调。
+
+对 MQTT 5 客户端，还支持：所有确认报文和服务端主动断开（会话被接管、keepalive 超时等）都带原因码，消息过期，用户属性等消息属性（原样转发给
+MQTT 5 订阅者），主题别名，接收上限，最大报文长度，服务端分配客户端 ID，订阅选项 No Local、Retain As Published 和 Retain Handling，以及遗嘱延迟。
+
+订阅最高授予 QoS 1。不支持 MQTT 5 的共享订阅、订阅标识符和增强认证（会按规范回复相应的原因码）。状态只保存在内存里。慢订阅者不会让 broker
+无限缓存：QoS 1 受在途窗口和队列长度限制，QoS 0 在超过 `MaxClientBuffer` 时丢弃。生产环境请设置 `SessionExpiry`，让永远不再上线的设备的会话
+被自动清理。
 
 ```go
 broker := mqtt.NewBroker(mqtt.Config{
+	SessionExpiry: 24 * time.Hour,
 	OnPublish: func(m *mqtt.Message) { /* m.ClientID, m.Topic, m.Payload */ },
 })
 srv, err := uringnet.Listen("tcp", ":1883", broker.Handler(), uringnet.WithTLS(cfg) /* 可选 */)
@@ -246,7 +254,7 @@ broker.Publish("devices/42/cmd", []byte("reboot"), 1, false)
 | 10 个发布者 → 100 个订阅者（扇出） | 每秒投递 135 万条 | 每秒投递 50.7 万条 | 2.67 |
 | 1000 个发布者，无订阅者 | 31.4 万条/秒 | 17.9 万条/秒 | 1.75 |
 
-与 `mosquitto_pub`/`mosquitto_sub` 客户端互通（QoS 0–2、保留消息、遗嘱、持久会话）。`example/mqttbroker` 是一个可以直接运行的 broker。
+与 `mosquitto_pub`/`mosquitto_sub` 客户端在 MQTT 5 和 3.1.1 下互通（QoS 0–2、保留消息、带延迟的遗嘱、持久会话、消息属性）。`example/mqttbroker` 是一个可以直接运行的 broker。
 
 ### 接收缓冲区的数量
 

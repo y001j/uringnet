@@ -40,9 +40,11 @@ func startBroker(t *testing.T, cfg Config, opts ...uringnet.Option) (*Broker, st
 
 // tclient is a minimal MQTT client built on the package's codec.
 type tclient struct {
-	t  *testing.T
-	c  net.Conn
-	rd *bufio.Reader
+	t       *testing.T
+	c       net.Conn
+	rd      *bufio.Reader
+	v       byte  // protocol level
+	connack props // MQTT 5 CONNACK properties
 }
 
 type connectOpts struct {
@@ -51,6 +53,8 @@ type connectOpts struct {
 	will       *Message
 	user, pass string
 	level      byte
+	props      *propWriter // MQTT 5 CONNECT properties
+	willProps  *propWriter // MQTT 5 will properties
 }
 
 func connectPkt(id string, o connectOpts) []byte {
@@ -74,8 +78,20 @@ func connectPkt(id string, o connectOpts) []byte {
 	body := appendString(nil, "MQTT")
 	body = append(body, level, flags)
 	body = binary.BigEndian.AppendUint16(body, o.keepAlive)
+	if level == version5 {
+		if o.props == nil {
+			o.props = &propWriter{}
+		}
+		body = o.props.appendTo(body)
+	}
 	body = appendString(body, id)
 	if o.will != nil {
+		if level == version5 {
+			if o.willProps == nil {
+				o.willProps = &propWriter{}
+			}
+			body = o.willProps.appendTo(body)
+		}
 		body = appendString(body, o.will.Topic)
 		body = appendBytes(body, o.will.Payload)
 	}
@@ -93,12 +109,23 @@ func dial(t *testing.T, addr, id string, o connectOpts) (*tclient, bool, byte) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tc := &tclient{t: t, c: c, rd: bufio.NewReader(c)}
+	tc := &tclient{t: t, c: c, rd: bufio.NewReader(c), v: o.level}
+	if tc.v == 0 {
+		tc.v = version311
+	}
 	t.Cleanup(func() { c.Close() })
 	tc.send(connectPkt(id, o))
 	typ, _, body := tc.read()
-	if typ != typeConnack || len(body) != 2 {
+	if typ != typeConnack || len(body) < 2 || (tc.v != version5 && len(body) != 2) {
 		t.Fatalf("expected CONNACK, got type %d % x", typ, body)
+	}
+	if tc.v == version5 {
+		r := &reader{b: body[2:]}
+		pp, err := parseProps(r)
+		if err != nil || len(r.b) != 0 {
+			t.Fatalf("CONNACK properties % x: %v", body, err)
+		}
+		tc.connack = pp
 	}
 	return tc, body[0] == 1, body[1]
 }
@@ -155,20 +182,36 @@ func (tc *tclient) read() (typ, flags byte, body []byte) {
 
 func (tc *tclient) subscribe(id uint16, filter string, qos byte) byte {
 	tc.t.Helper()
+	return tc.subscribeOpts(id, filter, qos, nil)
+}
+
+// subscribeOpts subscribes with an options byte (MQTT 5 flags included) and SUBSCRIBE properties.
+func (tc *tclient) subscribeOpts(id uint16, filter string, opts byte, pw *propWriter) byte {
+	tc.t.Helper()
 	body := binary.BigEndian.AppendUint16(nil, id)
+	if tc.v == version5 {
+		if pw == nil {
+			pw = &propWriter{}
+		}
+		body = pw.appendTo(body)
+	}
 	body = appendString(body, filter)
-	body = append(body, qos)
-	tc.send(append(appendLength([]byte{typeSubscribe<<4 | 0x02}, len(body)), body...))
+	body = append(body, opts)
+	tc.send(packet(nil, typeSubscribe<<4|0x02, body))
 	typ, _, resp := tc.read()
-	if typ != typeSuback || binary.BigEndian.Uint16(resp) != id || len(resp) != 3 {
+	want := 3
+	if tc.v == version5 {
+		want = 4 // with an empty property list
+	}
+	if typ != typeSuback || len(resp) != want || binary.BigEndian.Uint16(resp) != id {
 		tc.t.Fatalf("expected SUBACK %d, got type %d % x", id, typ, resp)
 	}
-	return resp[2]
+	return resp[want-1]
 }
 
 func (tc *tclient) publish(topic, payload string, qos byte, retain bool, id uint16) {
 	tc.t.Helper()
-	tc.send(appendPublish(nil, topic, []byte(payload), qos, retain, false, id))
+	tc.send(appendPublish(nil, tc.v, topic, []byte(payload), qos, retain, false, id, nil, 0))
 	switch qos {
 	case 1:
 		tc.expectAck(typePuback, id)
@@ -179,10 +222,30 @@ func (tc *tclient) publish(topic, payload string, qos byte, retain bool, id uint
 
 func (tc *tclient) expectAck(typ byte, id uint16) {
 	tc.t.Helper()
+	tc.expectAckReason(typ, id, rcSuccess)
+}
+
+// expectAckReason expects an acknowledgement with an MQTT 5 reason code (0: none sent).
+func (tc *tclient) expectAckReason(typ byte, id uint16, reason byte) {
+	tc.t.Helper()
 	got, _, body := tc.read()
-	if got != typ || len(body) != 2 || binary.BigEndian.Uint16(body) != id {
-		tc.t.Fatalf("expected ack type %d id %d, got type %d % x", typ, id, got, body)
+	want := []byte{byte(id >> 8), byte(id)}
+	if reason != rcSuccess {
+		want = append(want, reason)
 	}
+	if got != typ || string(body) != string(want) {
+		tc.t.Fatalf("expected ack type %d % x, got type %d % x", typ, want, got, body)
+	}
+}
+
+// expectDisconnect expects an MQTT 5 DISCONNECT with reason, then the connection to close.
+func (tc *tclient) expectDisconnect(reason byte) {
+	tc.t.Helper()
+	typ, _, body := tc.read()
+	if typ != typeDisconnect || len(body) < 1 || body[0] != reason {
+		tc.t.Fatalf("expected DISCONNECT %#x, got type %d % x", reason, typ, body)
+	}
+	tc.expectClosed()
 }
 
 // expectPublish reads a PUBLISH and returns it (and acknowledges QoS 1 if ack is set).
@@ -192,13 +255,13 @@ func (tc *tclient) expectPublish(ack bool) *publishPacket {
 	if typ != typePublish {
 		tc.t.Fatalf("expected PUBLISH, got type %d", typ)
 	}
-	p, err := parsePublish(flags, body)
+	p, err := parsePublish(flags, body, tc.v)
 	if err != nil {
 		tc.t.Fatal(err)
 	}
 	p.payload = append([]byte(nil), p.payload...)
 	if ack && p.qos == 1 {
-		tc.send(appendAck(nil, typePuback, p.id))
+		tc.send(appendAck(nil, tc.v, typePuback, p.id, rcSuccess))
 	}
 	return p
 }
@@ -372,9 +435,9 @@ func TestQoS2Incoming(t *testing.T) {
 	sub.subscribe(1, "t", 1)
 	pub := connect(t, addr, "pub", connectOpts{clean: true})
 	pub.publish("t", "once", 2, false, 7)
-	pub.send(appendPublish(nil, "t", []byte("once"), 2, false, true, 7)) // resent before PUBREL
+	pub.send(appendPublish(nil, version311, "t", []byte("once"), 2, false, true, 7, nil, 0)) // resent before PUBREL
 	pub.expectAck(typePubrec, 7)
-	pub.send(appendAck(nil, typePubrel, 7))
+	pub.send(appendAck(nil, version311, typePubrel, 7, rcSuccess))
 	pub.expectAck(typePubcomp, 7)
 	if p := sub.expectPublish(true); string(p.payload) != "once" {
 		t.Fatalf("%+v", p)
@@ -440,18 +503,6 @@ func TestUnsupportedProtocol(t *testing.T) {
 		t.Fatalf("code %d", code)
 	}
 	c.expectClosed()
-	// MQTT 5 gets a v5 CONNACK with reason code 0x84
-	raw5, err := net.Dial("tcp4", addr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer raw5.Close()
-	raw5.Write(connectPkt("v5", connectOpts{clean: true, level: 5}))
-	t5 := &tclient{t: t, c: raw5, rd: bufio.NewReader(raw5)}
-	if typ, _, body := t5.read(); typ != typeConnack || len(body) != 3 || body[1] != 0x84 {
-		t.Fatalf("MQTT 5 CONNACK: type %d % x", typ, body)
-	}
-	t5.expectClosed()
 	// A first packet other than CONNECT closes the connection
 	raw, err := net.Dial("tcp4", addr)
 	if err != nil {
@@ -531,7 +582,7 @@ func TestSlowSubscriberQoS0(t *testing.T) {
 	fast.subscribe(1, "ping", 0)
 	pub := connect(t, addr, "pub", connectOpts{clean: true})
 	payload := make([]byte, 4096)
-	pkt := appendPublish(nil, "flood", payload, 0, false, false, 0)
+	pkt := appendPublish(nil, version311, "flood", payload, 0, false, false, 0, nil, 0)
 	for i := 0; i < 5000; i++ { // 20MB, far more than the socket buffers and the limit
 		pub.send(pkt)
 	}

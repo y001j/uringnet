@@ -243,17 +243,27 @@ With a multicast address (`ListenPacket("udp4", "239.1.2.3:5000", h)`) the group
 
 ### MQTT broker
 
-The `mqtt` package is an MQTT 3.1.1 broker for IoT gateways: devices connect and publish, and the application in
-the same process receives every message (`OnPublish`) and sends commands to devices (`Publish`). It supports QoS 0,
-1 and 2 from publishers (QoS 2 is delivered exactly once), wildcards `+` and `#`, retained messages, wills,
-persistent sessions (QoS 1 queued while a device is offline and resent after a reconnect), session takeover and
-keepalive timeouts, with hooks for authentication and publish/subscribe authorization. Subscriptions are granted at
-most QoS 1; state is kept in memory; MQTT 5 clients are refused with "unsupported protocol version". Slow
+The `mqtt` package is an MQTT broker for IoT gateways: devices connect and publish, and the application in the
+same process receives every message (`OnPublish`) and sends commands to devices (`Publish`). It speaks **MQTT 5 and
+3.1.1** (and 3.1), and clients of different versions talk to each other. It supports QoS 0, 1 and 2 from publishers
+(QoS 2 is delivered exactly once), wildcards `+` and `#`, retained messages, wills, persistent sessions (QoS 1
+queued while a device is offline and resent after a reconnect) with **session expiry**, session takeover and
+keepalive timeouts, with hooks for authentication and publish/subscribe authorization.
+
+For MQTT 5 clients it adds reason codes on every acknowledgement and on server-initiated disconnects (session taken
+over, keepalive timeout, ...), message expiry, user properties and the other message properties (forwarded to MQTT 5
+subscribers), topic aliases, receive maximum, maximum packet size, assigned client IDs, the subscription options
+No Local, Retain As Published and Retain Handling, and will delay.
+
+Subscriptions are granted at most QoS 1. MQTT 5 shared subscriptions, subscription identifiers and enhanced
+authentication are not supported (refused with the corresponding reason codes). State is kept in memory. Slow
 subscribers cannot make it buffer without limit: QoS 1 is bounded by the inflight window and queue, QoS 0 is dropped
-above `MaxClientBuffer`.
+above `MaxClientBuffer`. Set `SessionExpiry` in production, so that the sessions of devices that never come back are
+removed.
 
 ```go
 broker := mqtt.NewBroker(mqtt.Config{
+	SessionExpiry: 24 * time.Hour,
 	OnPublish: func(m *mqtt.Message) { /* m.ClientID, m.Topic, m.Payload */ },
 })
 srv, err := uringnet.Listen("tcp", ":1883", broker.Handler(), uringnet.WithTLS(cfg) /* optional */)
@@ -269,7 +279,8 @@ Against Mosquitto 2.0.22 (both on 1 core, QoS 1 publishers waiting for each PUBA
 | 10 publishers → 100 subscribers (fan-out) | 1.35M deliveries/s | 507k deliveries/s | 2.67 |
 | 1000 publishers, no subscriber | 314k msg/s | 179k msg/s | 1.75 |
 
-It interoperates with the `mosquitto_pub`/`mosquitto_sub` clients (QoS 0–2, retained, wills, persistent sessions).
+It interoperates with the `mosquitto_pub`/`mosquitto_sub` clients in MQTT 5 and 3.1.1 (QoS 0–2, retained, wills with
+delay, persistent sessions, properties).
 `example/mqttbroker` is a runnable broker.
 
 ### Sizing receive buffers

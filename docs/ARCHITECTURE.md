@@ -187,7 +187,10 @@ deliver to it. Subscriptions are a trie with one level per node, matched under a
 directly when the subscriber shares the publisher's ring (`Conn.SameLoop`) and posts to the subscriber's ring
 otherwise (`Conn.Post`), where QoS 0 is dropped if the subscriber's unsent data exceeds `MaxClientBuffer`; a QoS 0
 packet is encoded once and shared read-only by all subscribers. QoS 1 per session has an inflight window and a
-queue, resent with DUP after a reconnect. A goroutine enforces CONNECT and keepalive timeouts.
+queue, resent with DUP after a reconnect. A goroutine enforces CONNECT and keepalive timeouts and removes expired
+sessions. MQTT 5 and 3.1.1 share all of this: the protocol version is per connection and only changes the encoding
+(a QoS 0 packet is encoded at most once per version), so messages flow between versions; MQTT 5 message properties
+travel with the message and are dropped when encoding for 3.1.1.
 
 ## The epoll backend
 
