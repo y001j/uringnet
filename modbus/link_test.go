@@ -68,14 +68,16 @@ func newDevice(t *testing.T, rtu bool, serveConn func(d *device, c net.Conn)) *d
 		t.Fatal(err)
 	}
 	d := &device{t: t, ln: ln, rtu: rtu}
-	go d.accept(serveConn)
-	t.Cleanup(func() { d.ln.Close() })
+	go d.accept(ln, serveConn)
+	t.Cleanup(func() { ln.Close() })
 	return d
 }
 
-func (d *device) accept(serveConn func(d *device, c net.Conn)) {
+// accept serves ln; it takes the listener as a parameter so that a test can replace a device's
+// listener without racing with the goroutine serving the old one.
+func (d *device) accept(ln net.Listener, serveConn func(d *device, c net.Conn)) {
 	for {
-		c, err := d.ln.Accept()
+		c, err := ln.Accept()
 		if err != nil {
 			return
 		}
@@ -449,8 +451,8 @@ func TestReconnect(t *testing.T) {
 	if err != nil {
 		t.Skipf("cannot listen on %s again: %v", addr, err)
 	}
-	d.ln = ln
-	go d.accept(handler)
+	t.Cleanup(func() { ln.Close() })
+	go d.accept(ln, handler)
 	if err := <-res; err != nil {
 		t.Fatalf("request across the outage: %v", err)
 	}
