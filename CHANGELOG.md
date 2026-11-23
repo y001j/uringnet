@@ -23,6 +23,14 @@ All notable changes to this project are documented here. The format follows
   master with context-aware requests, pipelining, timeouts, retries and reconnection; `DTUServer`, a master for
   DTUs and serial device servers that connect in, with registration and heartbeat packets; `Server`, a slave with
   the `Memory` data model and `Units` routing; `example/modbusdtu`.
+- `modbus`: point tables (`Point`: table, address, data type, byte order, bit, string length, scale, offset,
+  interval; JSON) with `DecodeRegisters`/`EncodeRegisters`; `Poller`, which merges adjacent points into requests,
+  schedules all devices from one goroutine with asynchronous requests, skips overrunning polls, reports
+  `ErrOffline` and writes points.
+- `gateway` package: publishes polled values to an `mqtt.Broker` (per point or per device, retained, only on
+  change), device status, and opt-in write commands answered on a result topic or the MQTT 5 response topic;
+  `example/gateway`, configured by JSON with point-table templates and automatic DTU polling.
+- `mqtt.Broker.Subscribe`: in-process subscriptions.
 
 ## [v0.4.0] - 2026-11-23
 

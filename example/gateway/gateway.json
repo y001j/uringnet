@@ -1,0 +1,37 @@
+{
+  "mqtt": {"listen": ":1883"},
+  "gateway": {
+    "prefix": "devices",
+    "interval": "5s",
+    "layout": "point",
+    "retain": true,
+    "only_changes": false,
+    "writes": false
+  },
+  "dtu": {
+    "listen": ":9000",
+    "framing": "rtu",
+    "register": 15,
+    "heartbeat": "HB",
+    "timeout": "2s",
+    "retries": 1,
+    "auto": {"template": "meter", "unit": 1}
+  },
+  "client": {"timeout": "1s", "retries": 1},
+  "templates": {
+    "meter": [
+      {"name": "voltage", "table": "input", "address": 0, "type": "float32", "order": "CDAB"},
+      {"name": "current", "table": "input", "address": 2, "scale": 0.01},
+      {"name": "energy", "table": "input", "address": 3, "type": "uint32", "scale": 0.01, "interval": "1m"},
+      {"name": "relay", "table": "coil", "address": 0, "type": "bool"}
+    ]
+  },
+  "devices": [
+    {"name": "meter-001", "dtu": "860000000000001", "template": "meter"},
+    {"name": "plc-1", "address": "192.168.1.10:502", "framing": "tcp", "unit": 1, "points": [
+      {"name": "temperature", "address": 0, "type": "int16", "scale": 0.1},
+      {"name": "setpoint", "address": 1, "type": "int16", "scale": 0.1},
+      {"name": "running", "address": 2, "type": "bool", "bit": 0}
+    ]}
+  ]
+}
