@@ -19,6 +19,10 @@ All notable changes to this project are documented here. The format follows
 - `mqtt`: `Config.SessionExpiry` removes sessions offline for longer (MQTT 3.1.1 persistent sessions never expired
   before) and caps the expiry MQTT 5 clients ask for; `Config.TopicAliasMaximum`.
 - `Conn.SameLoop` and `Conn.Post`.
+- `modbus` package: Modbus TCP and RTU over TCP (functions 0x01–0x06, 0x0F, 0x10, 0x17, exceptions). `Client`, a
+  master with context-aware requests, pipelining, timeouts, retries and reconnection; `DTUServer`, a master for
+  DTUs and serial device servers that connect in, with registration and heartbeat packets; `Server`, a slave with
+  the `Memory` data model and `Units` routing; `example/modbusdtu`.
 
 ## [v0.4.0] - 2026-11-23
 

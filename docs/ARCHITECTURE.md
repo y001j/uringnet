@@ -192,6 +192,16 @@ sessions. MQTT 5 and 3.1.1 share all of this: the protocol version is per connec
 (a QoS 0 packet is encoded at most once per version), so messages flow between versions; MQTT 5 message properties
 travel with the message and are dropped when encoding for 3.1.1.
 
+## Modbus
+
+`modbus` reads with `Peek`/`Discard` rather than `Framed`, because framing depends on per-connection state: a
+DTU's registration packet comes first, heartbeats may appear between frames, and RTU (no length field) frames by
+function code and byte count, resynchronizing by dropping buffered bytes when they cannot start a frame. A `Link`
+holds the master state under a mutex — a queue, outstanding requests by transaction ID (RTU: one, ID 0), a timer
+per request — so requests come from any goroutine; frames are written directly on the loop thread when a
+response frees a slot, and with `AsyncWrite` otherwise. A `Client` runs one goroutine per Link that dials with
+`Client.Dial` and waits for the connection to end before redialing.
+
 ## The epoll backend
 
 When io_uring is unavailable (kernel before 6.0, blocked by seccomp, `kernel.io_uring_disabled`), `BackendAuto`
