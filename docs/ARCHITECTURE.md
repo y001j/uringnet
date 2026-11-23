@@ -202,6 +202,15 @@ per request — so requests come from any goroutine; frames are written directly
 response frees a slot, and with `AsyncWrite` otherwise. A `Client` runs one goroutine per Link that dials with
 `Client.Dial` and waits for the connection to end before redialing.
 
+## Poller and gateway
+
+`Poller.Add` splits a device's points by interval and plans each group into read requests (points of one unit and
+table, contiguous or within MaxGap, at most 125 registers / 2000 bits). One goroutine keeps the groups in a heap by
+next run time; a due group sends its requests with `Link.Go` and returns, and the last callback decodes the values
+and hands them to a delivery goroutine that calls `OnValues` in order. A group never has two polls in progress, so
+a slow or reconnecting device holds at most one poll's requests. `gateway` is an `OnValues` that publishes with
+`Broker.Publish`, and a `Broker.Subscribe` handler that turns `.../set` messages into `Poller.WriteAsync`.
+
 ## The epoll backend
 
 When io_uring is unavailable (kernel before 6.0, blocked by seccomp, `kernel.io_uring_disabled`), `BackendAuto`

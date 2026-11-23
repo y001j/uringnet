@@ -599,3 +599,38 @@ func TestSlowSubscriberQoS0(t *testing.T) {
 	}
 	t.Logf("stats %+v", b.Stats())
 }
+
+func TestLocalSubscribe(t *testing.T) {
+	b, addr := startBroker(t, Config{})
+	got := make(chan Message, 8)
+	cancel, err := b.Subscribe("cmd/+/set", func(m *Message) {
+		got <- Message{Topic: m.Topic, Payload: append([]byte(nil), m.Payload...), ClientID: m.ClientID}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Subscribe("a/#/b", func(*Message) {}); err == nil {
+		t.Fatal("invalid filter accepted")
+	}
+	pub := connect(t, addr, "dev", connectOpts{clean: true})
+	pub.publish("cmd/7/set", "on", 1, false, 1)
+	pub.publish("cmd/7/other", "x", 0, false, 0)
+	if m := <-got; m.Topic != "cmd/7/set" || string(m.Payload) != "on" || m.ClientID != "dev" {
+		t.Fatalf("%+v", m)
+	}
+	b.Publish("cmd/8/set", []byte("off"), 0, false) // from the application too
+	if m := <-got; m.Topic != "cmd/8/set" || m.ClientID != "" {
+		t.Fatalf("%+v", m)
+	}
+	cancel()
+	cancel() // idempotent
+	b.Publish("cmd/9/set", []byte("x"), 0, false)
+	select {
+	case m := <-got:
+		t.Fatalf("after cancel: %+v", m)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if st := b.Stats(); st.Subscriptions != 0 {
+		t.Fatalf("local subscriptions counted as client subscriptions: %+v", st)
+	}
+}

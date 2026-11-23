@@ -39,7 +39,7 @@ io_uring 带来的是少得多的系统调用（高负载下每个请求低至 0
 
 ### 是否适合你的项目
 
-UringNet 是为物联网网关设计的：连接多、消息小、请求/响应式的流量。它支持 TCP、Unix 流式套接字和 UDP、TLS，以及拨出连接、消息分帧、MQTT broker 和 Modbus。满足以下条件时可以考虑使用：
+UringNet 是为物联网网关设计的：连接多、消息小、请求/响应式的流量。它支持 TCP、Unix 流式套接字和 UDP、TLS，以及拨出连接、消息分帧、MQTT broker、Modbus，以及 Modbus 到 MQTT 的网关。满足以下条件时可以考虑使用：
 
 - 运行 Linux 6.0+（recv bundle 需要 6.16+），并且主机允许使用 io_uring（Docker 和 Kubernetes 默认的 seccomp 配置会禁用它；没有 io_uring 时会回退到 epoll，能运行，但失去了大部分优势）；
 - 你在意延迟或系统调用开销，并且能为忙轮询留出一些 CPU。
@@ -284,6 +284,30 @@ regs, err := s.Link("860000000000001").ReadHoldingRegisters(ctx, 1, 0, 10)
 RTU 没有事务号，所以 `Link` 在 RTU 下一次只发一个请求，丢弃与当前请求不相符的响应，并在超时后等待 `Drain` 时长再发下一个请求，避免把迟到的
 响应当成下一个请求的回答。已与 pymodbus（双向、两种分帧）和 mbpoll/libmodbus 做过互通测试。`example/modbusdtu` 是一个可以直接运行的
 DTU 服务器。直接接在主机上的串口（RS-485）不在本库范围内。
+
+### 物联网网关：Modbus 到 MQTT
+
+上面这些模块组合起来，就是一个单进程的网关。**点表**描述每台设备的数据点：表、地址、数据类型（16/32/64 位整数、float32/64、寄存器
+中的某一位、字符串）、字节序（`ABCD`、`CDAB`、`BADC`、`DCBA`）、缩放系数和偏移量、采集周期，可以直接从 JSON 加载。**`modbus.Poller`**
+负责轮询：相邻地址的点合并成一次请求，由一个调度协程发出异步请求，成千上万台设备也不用每台占一个协程；上一轮没结束就跳过本轮；写点时
+按点的类型反向编码。**`gateway`** 包把采集值发布到同一进程里的 `mqtt.Broker`：
+
+```
+devices/<设备>/<点>             {"value": 230.5, "ts": 1700000000000}   （出错时为 {"error": ...}）
+devices/<设备>/status           online | offline   （保留消息）
+devices/<设备>/<点>/set         写命令，需用 Writes 显式开启；结果发到 .../set/result，
+                                或发到 MQTT 5 请求指定的响应主题（带关联数据）
+```
+
+```go
+broker := mqtt.NewBroker(mqtt.Config{})
+gw, _ := gateway.New(gateway.Config{Broker: broker, Retain: true, Poller: modbus.PollerConfig{Interval: 5 * time.Second}})
+gw.Poller().Add(modbus.Device{Name: "meter-001", Link: func() *modbus.Link { return dtu.Link("860000000000001") },
+	Points: []modbus.Point{{Name: "voltage", Table: modbus.InputRegister, Type: modbus.Float32, Order: modbus.CDAB}}})
+```
+
+`example/gateway` 用一个 JSON 文件启动全部功能：MQTT broker、DTU 服务器、直连设备、点表模板，以及任意 DTU 上线后自动接入轮询。网关接收
+写命令用的是 `mqtt.Broker.Subscribe`（进程内订阅），应用程序也可以直接使用。
 
 ### 接收缓冲区的数量
 

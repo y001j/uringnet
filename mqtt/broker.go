@@ -77,7 +77,10 @@ var ErrInvalidTopic = errors.New("mqtt: invalid topic name")
 type Broker struct {
 	cfg  Config
 	subs *subscriptions[*session, subOpts]
-	log  *slog.Logger
+	// local are in-process subscriptions (Broker.Subscribe)
+	local  *subscriptions[*localSub, byte]
+	nLocal atomic.Int32
+	log    *slog.Logger
 
 	mu       sync.Mutex
 	sessions map[string]*session
@@ -134,7 +137,7 @@ func NewBroker(cfg Config) *Broker {
 	if cfg.ConnectTimeout <= 0 {
 		cfg.ConnectTimeout = 10 * time.Second
 	}
-	b := &Broker{cfg: cfg, subs: newSubscriptions[*session, subOpts](), sessions: make(map[string]*session),
+	b := &Broker{cfg: cfg, subs: newSubscriptions[*session, subOpts](), local: newSubscriptions[*localSub, byte](), sessions: make(map[string]*session),
 		clients: make(map[*client]struct{}), retained: make(map[string]*stored), stop: make(chan struct{})}
 	b.log = cfg.Logger
 	if b.log == nil {
@@ -172,6 +175,30 @@ func (b *Broker) PublishMessage(m *Message) error {
 	msg.ClientID = ""
 	b.route(nil, &msg, deadlineOf(m.Expiry))
 	return nil
+}
+
+// localSub is an in-process subscription.
+type localSub struct{ fn func(m *Message) }
+
+// Subscribe calls fn for every message published to a topic matching filter (wildcards allowed),
+// by clients or with Publish, so the application can receive messages without a client
+// connection. fn runs on the publisher's event loop (or the goroutine calling Publish) and must not
+// block; m.Payload is only valid during the call. The returned function cancels the subscription.
+// Unlike OnPublish, it sees messages from Publish too, and it is not subject to AuthorizeSubscribe.
+func (b *Broker) Subscribe(filter string, fn func(m *Message)) (cancel func(), err error) {
+	if !validFilter(filter) {
+		return nil, fmt.Errorf("mqtt: invalid topic filter %q", filter)
+	}
+	ls := &localSub{fn: fn}
+	b.local.add(filter, ls, 0)
+	b.nLocal.Add(1)
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			b.local.remove(filter, ls)
+			b.nLocal.Add(-1)
+		})
+	}, nil
 }
 
 // Stats returns the broker's counters.
@@ -360,6 +387,9 @@ func (b *Broker) route(from *uringnet.Conn, m *Message, deadline int64) {
 	}
 	if m.ClientID != "" && b.cfg.OnPublish != nil {
 		b.cfg.OnPublish(m)
+	}
+	if b.nLocal.Load() > 0 {
+		b.local.match(m.Topic, func(a, _ byte) byte { return a }, func(ls *localSub, _ byte) { ls.fn(m) })
 	}
 	secs, _ := remaining(deadline)
 	cache := &qos0Cache{m: m, secs: secs}

@@ -46,7 +46,7 @@ submits a whole batch of requests and waits for a batch of results.
 ### Should You adopt it in your project
 
 UringNet was designed for IoT gateways: many connections, small messages, request/response traffic. It provides TCP, Unix
-stream sockets and UDP, TLS, outgoing connections, message framing, an MQTT broker and Modbus. Consider it if:
+stream sockets and UDP, TLS, outgoing connections, message framing, an MQTT broker, Modbus and a Modbus-to-MQTT gateway. Consider it if:
 
 - you run Linux 6.0+ (6.16+ for recv bundles) and io_uring is allowed on the host (it is blocked by Docker's and Kubernetes'
   default seccomp profiles; without io_uring uringnet falls back to epoll, which works but loses most of the advantage), and
@@ -315,6 +315,33 @@ RTU has no transaction IDs, so a `Link` sends one RTU request at a time, ignores
 outstanding request, and waits `Drain` after a timeout so a late answer is not taken for the next one. Verified
 against pymodbus (both directions, both framings) and mbpoll/libmodbus. `example/modbusdtu` is a runnable DTU server.
 Serial lines (RS-485 directly on the host) are out of scope.
+
+### IoT gateway: Modbus to MQTT
+
+The pieces above add up to a gateway in one process. A **point table** describes each device's values — table,
+address, data type (16/32/64-bit integers, float32/64, bits, strings), byte order (`ABCD`, `CDAB`, `BADC`,
+`DCBA`), scale and offset, interval — and loads from JSON. A **`modbus.Poller`** reads the points, merging
+adjacent ones into one request, from a single scheduling goroutine with asynchronous requests, so thousands of
+devices cost no goroutine each; it skips a poll while the previous one is unfinished and writes points with the
+inverse encoding. The **`gateway`** package publishes the values to the in-process `mqtt.Broker`:
+
+```
+devices/<device>/<point>          {"value": 230.5, "ts": 1700000000000}   (or {"error": ...})
+devices/<device>/status           online | offline   (retained)
+devices/<device>/<point>/set      write commands — opt-in with Writes, answered on .../set/result
+                                  or on the MQTT 5 response topic with the correlation data
+```
+
+```go
+broker := mqtt.NewBroker(mqtt.Config{})
+gw, _ := gateway.New(gateway.Config{Broker: broker, Retain: true, Poller: modbus.PollerConfig{Interval: 5 * time.Second}})
+gw.Poller().Add(modbus.Device{Name: "meter-001", Link: func() *modbus.Link { return dtu.Link("860000000000001") },
+	Points: []modbus.Point{{Name: "voltage", Table: modbus.InputRegister, Type: modbus.Float32, Order: modbus.CDAB}}})
+```
+
+`example/gateway` runs it all from a JSON file: MQTT broker, DTU server, devices to connect to, point-table
+templates, and automatic polling of any DTU that comes online. `mqtt.Broker.Subscribe` (in-process subscriptions)
+is what the gateway uses for commands, and is available to applications too.
 
 ### Sizing receive buffers
 
