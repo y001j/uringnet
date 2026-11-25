@@ -4,7 +4,10 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/). Before v1.0.0, minor versions may change the API.
 
-## [Unreleased]
+## [v0.5.0] - 2026-11-24
+
+IoT protocols on top of the core: an MQTT broker (3.1.1 and 5), Modbus TCP / RTU over TCP, and a
+Modbus-to-MQTT gateway that runs in one process. No breaking changes.
 
 ### Added
 - `mqtt` package: an MQTT 3.1.1 broker (QoS 0–2 from publishers, wildcards, retained messages, wills, persistent
@@ -138,6 +141,7 @@ Pre-release of the rebuilt core with the hardening above, before the API rework.
 
 Last release of the original implementation.
 
+[v0.5.0]: https://github.com/y001j/uringnet/compare/v0.4.0...v0.5.0
 [v0.4.0]: https://github.com/y001j/uringnet/compare/v0.3.0...v0.4.0
 [v0.3.0]: https://github.com/y001j/uringnet/compare/v0.2.0...v0.3.0
 [v0.2.0]: https://github.com/y001j/uringnet/compare/v0.1.0...v0.2.0

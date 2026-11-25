@@ -12,10 +12,10 @@
 - 第 12、13、15 项：拨出连接（Dial/DialAsync/NewClient）、UDP（ListenPacket）、分帧（Framed）已完成。
 - 第 17 项：`Server.Stats()`；第 22 项：`example_test.go`、代码注释统一为英文、架构文档 `docs/ARCHITECTURE.md`。
 - 第 16 项（零拷贝接收）不做：需要数据中心级专用网卡。
-- 2026-11-23：新增 MQTT 3.1.1 broker（`mqtt` 包）。
-- 2026-11-23：MQTT 5（第一步）和会话过期。
-- 2026-11-23：Modbus TCP / RTU over TCP（`modbus` 包）：主站、DTU 服务器、从站。
-- 2026-11-23：点表、轮询器和 Modbus 到 MQTT 的网关（`gateway` 包）。
+- 2026-11-23：新增 MQTT 3.1.1 broker（`mqtt` 包）（v0.5.0）。
+- 2026-11-23：MQTT 5（第一步）和会话过期（v0.5.0）。
+- 2026-11-23：Modbus TCP / RTU over TCP（`modbus` 包）：主站、DTU 服务器、从站（v0.5.0）。
+- 2026-11-23：点表、轮询器和 Modbus 到 MQTT 的网关（`gateway` 包）（v0.5.0）。
 - 2026-11-23：与 gnet/标准库对比后补齐负载均衡、增量读取 API、keepalive 与缓冲区选项、慢回调检测、UDP 组播（v0.4.0）。
 - 第 5 项的 epoll 回退、第 14 项 TLS（WithTLS / WithDialTLS，TLS 1.3 使用内核 TLS）已完成，随 v0.3.0 发布。
 

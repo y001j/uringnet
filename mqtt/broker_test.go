@@ -461,8 +461,15 @@ func TestSessionTakeover(t *testing.T) {
 	if p := second.expectPublish(true); string(p.payload) != "hi" {
 		t.Fatalf("%+v", p)
 	}
-	if disconnects.Load() != 1 {
-		t.Fatalf("%d disconnects", disconnects.Load())
+	// The old connection's OnClose runs on its own event loop, possibly after the client saw the
+	// close: wait for it, then check that it is reported once
+	deadline := time.Now().Add(2 * time.Second)
+	for disconnects.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if n := disconnects.Load(); n != 1 {
+		t.Fatalf("%d disconnects", n)
 	}
 }
 
